@@ -218,3 +218,42 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ==============================================================================
+# Document Extraction & Mechanics Pipeline Specifics
+# ==============================================================================
+
+# Proprietary RPG Sources & Extracted Artifacts
+*.pdf
+*.md
+!README.md
+!docs/**/*.md
+
+# Pipeline Output Directories
+PDF_Chapters/
+Markdown/
+Extracted_Rulebook/
+
+# Docling / OCR / Layout Model Artifacts & Weight Caches
+.cache_*/
+models/
+timm/
+easyocr/
+surya/
+
+# API Secrets & Local Configuration Overrides
+.env.local
+*.key
+credentials.json
+
+# Windows & Workspace Junk
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
