@@ -1,0 +1,111 @@
+"""Cosmere RPG specific rules, keywords, prompts, and text patches."""
+
+import re
+
+# Chapters containing these words in their title trigger the Full Pipeline (Docling + Gemini + Merge)
+MECHANICS_KEYWORDS = [
+    "path",  # Heroic Paths, Metalborn Paths
+    "art",  # Metallic Arts
+    "combat",  # Combat
+    "item",  # Items & Equipment
+    "adversar",  # Adversaries / Bestiary
+]
+
+DEFAULT_PROMPT = """
+Convert this Cosmere RPG rules section into clean, highly structured Markdown.
+
+Strict Icon Translation Rules:
+1. Action Economy & Activation Icons:
+   - Single filled diamond -> `[1 Action]`
+   - Two diamonds -> `[2 Actions]`
+   - Three diamonds -> `[3 Actions]`
+   - Clockwise loop / circular arrow -> `[Reaction]`
+   - Open / winged diamond -> `[Free Action]`
+   - Star icon (★) or badge -> `[Special Activation]`
+   - Figure-8 / infinity symbol -> `[Passive]`
+2. Plot Die Icons (In Text & Rolls Only):
+   - Crossed keys / sunburst icon -> `[Opportunity]` (Never use this as a talent's Activation cost)
+   - Spiked skull / complication icon -> `[Complication]`
+3. Talent Formatting:
+   - Always format talent prerequisites and activation costs under the talent header as:
+     - **Prerequisites:** <prereqs>
+     - **Activation:** [1 Action] / [2 Actions] / [3 Actions] / [Reaction] / [Free Action] / [Special Activation] / [Passive]
+4. Content Integrity:
+   - Do NOT omit introductory text, class overviews, sidebars, or character archetype builds.
+   - Convert sidebars and designer notes into blockquotes (`> `).
+   - Omit recurring page headers, page numbers, and purely decorative image captions.
+"""  # noqa: E501
+
+# Case-insensitive / normalized inline phrase fixes for Cosmere rulebooks
+UNIVERSAL_INLINE_FIXES = {
+    # Stances & Actions
+    r"enter as :": "enter as [Free Action]:",
+    r"enter another stance you know as ▷": "enter another stance you know as [Free Action]",
+    r"enter another stance you know as :": "enter another stance you know as [Free Action]:",
+    r"Grapple or Shove as \(instead of\)": "Grapple or Shove as [1 Action] (instead of [2 Actions])",
+    # Reactions
+    r"without spending ↻": "without spending [Reaction]",
+    r"gain an additional ↻": "gain an additional [Reaction]",
+    r"spending ↻": "spending [Reaction]",
+    # Action Grants & Movement
+    r"spend an additional to Disengage": "spend an additional [1 Action] to Disengage",
+    r"must spend an additional when they draw": "must spend an additional [1 Action] when they draw",
+    r"gain that can be spent only on the Brace": "gain [Free Action] that can be spent only on the Brace",
+    r"gain that can be spent only to Strike": "gain [Free Action] that can be spent only to Strike",
+    r"use their Rousing Presence as \.": "use their Rousing Presence as [Free Action].",
+    r"use your Field Medicine as \.": "use your Field Medicine as [Free Action].",
+    # Chapter 4 Specifics (Agent & Scholar inline gaps)
+    r"gain for cognitive tests": "gain [2 Actions] for cognitive tests",
+    r"gain for physical tests": "gain [2 Actions] for physical tests",
+    r"gain for spiritual tests": "gain [2 Actions] for spiritual tests",
+    r"use both to make an additional contribution": "use both [2 Actions] to make an additional contribution",
+    r"spend 1 focus or to apply": "spend 1 focus or [Opportunity] to apply",
+    r"to on the plot die": "to [Opportunity] on the plot die",
+    r"Spend from False Flattery": "Spend [Opportunity] from False Flattery",
+    # Chapter 5 Specifics
+    r"##\s*\)\s*Drink Vial\s*\(": "### Drink Vial `[1 Action]`",
+    r"[Ss]tore actions as \.": "Store actions as [Free Action].",
+    r"[Tt]ap actions as \.": "Tap actions as [Free Action].",
+    r"removed a piece of your metalmind \(as\)\s*and": "removed a piece of your metalmind (as [1 Action]) and",
+    r"[Ss]pend 2 focus to gain\s*,\s*which you can only use": (
+        "Spend 2 focus to gain [1 Action], which you can only use"
+    ),
+    r"gain for tapping your": "gain [1 Action] for tapping your",
+}
+
+
+def patch_cosmere_rules(text: str) -> str:
+    """Post-processing regex cleanup specifically for Cosmere RPG Markdown output."""
+    # 1. Introduction Action Economy definitions
+    text = re.sub(r"Actions\s*\(\s*\)\.", "Actions ([1 / 2 / 3 Actions]).", text)
+    text = re.sub(
+        r"requires one action, it's labeled\s*;\s*"
+        r"if it requires two actions, it's labeled\s*;\s*"
+        r"and if it requires three actions, it's labeled\s*\.",
+        "requires one action, it's labeled [1 Action]; "
+        "if it requires two actions, it's labeled [2 Actions]; "
+        "and if it requires three actions, it's labeled [3 Actions].",
+        text,
+    )
+    text = re.sub(r"Reactions\s*\(\s*\)\.", "Reactions ([Reaction]).", text)
+    text = re.sub(r"Free Actions\s*\(\s*\)\.", "Free Actions ([Free Action]).", text)
+
+    # 2. Plot Die Symbols
+    text = re.sub(r"Opportunity symbol\s*\(\s*\)", "Opportunity symbol ([Opportunity])", text)
+    text = re.sub(r"Complication symbol\s*\(\s*\)", "Complication symbol ([Complication])", text)
+
+    # 3. Mid-sentence Action/Reaction phrasing
+    text = re.sub(r"\bAs\s*,\s*you can", "As [1 Action], you can", text)
+    text = re.sub(r"action as\s*\.\s*(?=Before you take damage)", "action as [Reaction]. ", text)
+    text = re.sub(r"Recover action as\s*\.", "Recover action as [1 Action].", text)
+    text = re.sub(r"Interact action as\s*\.", "Interact action as [1 Action].", text)
+
+    # 4. Clean RapidOCR digit artifacts in headings from flowchart icons
+    text = re.sub(r"^(##\s+[A-Za-z\s]+?)\s+[28]$", r"\1", text, flags=re.MULTILINE)
+    text = re.sub(r"^##\s+2\s+([A-Za-z\s]+)$", r"## \1", text, flags=re.MULTILINE)
+
+    # 5. Fix standalone blank 'Activation:' lines
+    text = re.sub(r"^Activation:\s*$", "Activation: [Passive / Varies]", text, flags=re.MULTILINE)
+
+    return text
+

@@ -1,0 +1,75 @@
+[project]
+name = "ttrpg-markdown-pipeline"
+version = "0.1.0"
+description = "A pipeline for processing TTRPG markdown files."
+requires-python = ">=3.11"
+dependencies = [
+    "docling",
+    "google-genai",
+    "pymupdf",
+    "pymupdf4llm",
+]
+
+# Console commands installed by `pip install -e .` (usable from any directory)
+[project.scripts]
+ttrpg-pipeline = "ttrpg_markdown_pipeline.orchestrator:main"
+ttrpg-docling = "ttrpg_markdown_pipeline.extractors.docling:main"
+ttrpg-gemini = "ttrpg_markdown_pipeline.extractors.gemini:main"
+ttrpg-merge = "ttrpg_markdown_pipeline.processors.merge:main"
+ttrpg-patch = "ttrpg_markdown_pipeline.processors.patch:main"
+ttrpg-glyphs = "ttrpg_markdown_pipeline.tools.inspect_glyphs:main"
+
+# ==============================================================================
+# RUFF CONFIGURATION
+# Combines linter, formatter, and import sorter into one fast tool.
+# ==============================================================================
+[tool.ruff]
+# Target version matching your code runtime
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# Enable an expanded, strict rule set for clean code quality
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes (syntax/runtime bugs)
+    "I",    # isort (clean and organized import sorting)
+    "B",    # flake8-bugbear (common design flaws/bugs)
+    "UP",   # pyupgrade (upgrades syntax to modern Python)
+    "N",    # pep8-naming (keeps variable/function naming consistent)
+    "SIM",  # flake8-simplify (suggests clean code refactors)
+]
+ignore = []
+
+[tool.ruff.format]
+# Adheres directly to Black style formatting rules
+quote-style = "double"
+indent-style = "space"
+
+# ==============================================================================
+# MYPY CONFIGURATION
+# Static type checking rules to prevent data type mismatches.
+# ==============================================================================
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true       # Enforces explicit types on functions
+disallow_incomplete_defs = true   # Ensures all parameters have types
+check_untyped_defs = true
+no_implicit_optional = true
+
+# Ignore missing type stubs for external libraries lacking them
+[[tool.mypy.overrides]]
+module = "pymupdf4llm.*"
+ignore_missing_imports = true
+
+# ==============================================================================
+# BUILD CONFIGURATION
+# idk hatchling or something
+# ==============================================================================
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

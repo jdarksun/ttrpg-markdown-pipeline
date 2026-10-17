@@ -1,2 +1,172 @@
 # ttrpg-markdown-pipeline
-Hybrid PDF parser and vision-based mechanics injector for converting tabletop RPG rulebooks into structured Markdown.
+
+A hybrid PDF extraction and mechanics-injection pipeline designed to convert complex tabletop RPG rulebooks (specifically optimized for the **Cosmere RPG**) into clean, structured Markdown.
+
+---
+
+## Why a Hybrid Pipeline?
+
+Tabletop RPG rulebooks present unique challenges for automated document extraction:
+- **Standard OCR / Document AI** (like Docling) excels at reading columns, sidebars, tables, and long-form narrative text without hallucinations, but often fails on proprietary icon fonts (e.g. action diamonds `◆`, reaction arrows `↻`, or plot die symbols) or drops activation costs entirely.
+- **Multimodal LLMs** (like Gemini Vision) accurately identify custom visual icons, talent headers, and action costs, but running entire books through vision models is slow, expensive, prone to small text omissions, and constrained by daily API quotas.
+
+**This pipeline bridges both:**
+1. **Docling** extracts complete textual content, tables, and sidebars as the ground truth.
+2. **Gemini Vision** scans mechanics chapters to extract precise talent prerequisites and activation symbols into structured metadata.
+3. **Merge Engine** injects Gemini's mechanics metadata directly into Docling's clean document layout.
+4. **Glyph Patch Engine** cleans up inline symbols, stray OCR artifacts, and action economy phrasing.
+
+---
+
+## Installation
+
+### Prerequisites
+- Python 3.11 or newer
+- A Google Gemini API key (set in your environment as `GEMINI_API_KEY`)
+
+```bash
+# Clone the repository
+git clone https://github.com/your-username/ttrpg-markdown-pipeline.git
+cd ttrpg-markdown-pipeline
+
+# Install in editable mode
+pip install -e .
+```
+
+---
+
+## Quickstart: The Full Pipeline
+
+Run the orchestrator on any unsplit master rulebook PDF:
+
+```bash
+ttrpg-pipeline "C:\path\to\Cosmere_RPG_Handbook.pdf"
+```
+
+By default, this will create an `Extracted_Rulebook/` folder next to your PDF containing:
+- `PDF_Chapters/`: Sliced chapter PDFs based on the book's Table of Contents.
+- `Markdown/`: Fully extracted and patched Markdown files for each chapter.
+
+### Orchestrator Options
+
+```bash
+ttrpg-pipeline "path/to/rulebook.pdf" [OPTIONS]
+```
+
+| Option | Description |
+|---|---|
+| `-o`, `--output <DIR>` | Custom root output directory (defaults to `<pdf_dir>/Extracted_Rulebook`). |
+| `-f`, `--force` | Force re-extraction and overwrite existing `.md` files. |
+| `--docling-only` | Bypass Gemini Vision and mechanics merge for all chapters (useful if offline or out of quota). |
+| `--chunk-size <INT>` | Number of pages per Gemini Vision batch (default: `8`). |
+
+### How the Orchestrator Routes Chapters
+
+The orchestrator inspects each chapter title in the Table of Contents:
+- **Mechanics Chapters** (containing keywords like `path`, `art`, `combat`, `item`, `adversar`):
+  Runs Docling $\rightarrow$ Gemini Vision $\rightarrow$ Merge Engine $\rightarrow$ Glyph Patch. Output: `<Chapter> - MERGED.md`.
+- **Narrative / Lore Chapters**:
+  Runs Docling $\rightarrow$ Glyph Patch. Output: `<Chapter> - DOCLING.md`.
+
+---
+
+## Standalone CLI Tools
+
+Every stage of the pipeline is also available as a standalone command:
+
+### 1. `ttrpg-docling`
+Batch or single-file conversion via Docling with layout analysis:
+```bash
+# Convert a single PDF
+ttrpg-docling "Chapter_01.pdf" -o "Markdown/"
+
+# Batch convert a folder of PDFs (skips already converted files)
+ttrpg-docling "PDF_Chapters/" -o "Markdown/" --force
+```
+
+### 2. `ttrpg-gemini`
+Vision-based rules and icon extraction with automatic model failover and per-chapter chunk caching:
+```bash
+ttrpg-gemini "04-Heroic_Paths.pdf" -o "Markdown/" --chunk-size 8
+```
+*Note: If an API quota error occurs midway, progress is saved in `.cache_<output_stem>/`. Re-running the command resumes where it stopped.*
+
+### 3. `ttrpg-merge`
+Combines a Docling ground-truth file with a Gemini extraction file:
+```bash
+# Merge a single chapter stem
+ttrpg-merge 04-Heroic_Paths -d "Markdown/"
+
+# Batch merge all matching DOCLING and GEMINI pairs in a directory
+ttrpg-merge --all -d "Markdown/"
+```
+
+### 4. `ttrpg-patch`
+Applies Cosmere RPG inline regex fixes, icon translations, and heading cleanup:
+```bash
+# Patch a single file
+ttrpg-patch "Markdown/04-Heroic_Paths - MERGED.md"
+
+# Patch all final files in a directory (safely skips unmerged intermediates)
+ttrpg-patch "Markdown/"
+```
+
+### 5. `ttrpg-glyphs`
+Diagnostic utility for discovering Private Use Area (PUA) Unicode characters and icon fonts in a source PDF:
+```bash
+ttrpg-glyphs "rulebook.pdf" --search "Actions ("
+```
+
+---
+
+## File Tagging Convention
+
+All output markdown files follow consistent tagging so they can be identified at each stage:
+
+| Suffix | Origin / Stage |
+|---|---|
+| `<stem> - DOCLING.md` | Ground truth markdown generated by Docling. |
+| `<stem> - GEMINI.md` | Raw mechanics metadata extracted via Gemini Vision. |
+| `<stem> - MERGED.md` | Final merged file combining Docling layout with Gemini activations. |
+---
+
+## Project Architecture
+
+```
+src/ttrpg_markdown_pipeline/
+├── __init__.py
+├── common.py                 # Central path resolution and tag constants
+├── orchestrator.py           # Pipeline master workflow and TOC-based PDF splitter
+│
+├── extractors/               # PDF -> Markdown extraction backends
+│   ├── docling.py            # Docling OCR and layout analysis
+│   ├── gemini.py             # Multimodal Gemini Vision extractor
+│   └── pymupdf.py            # PyMuPDF4LLM quick layout extractor
+│
+├── processors/               # Markdown post-processing engines
+│   ├── merge.py              # Injects Gemini mechanics into Docling layout
+│   └── patch.py              # Generic icon, glyph, and regex repair runner
+│
+├── rules/                    # Game system configurations and prompts
+│   └── cosmere.py            # Cosmere RPG prompt, keywords, inline fixes, & patches
+│
+└── tools/                    # PDF inspection and diagnostics
+    └── inspect_glyphs.py     # Scans PDFs for Private Use Area glyphs and icon fonts
+```
+
+---
+
+## Development & Code Quality
+
+Linting, formatting, and strict type checking are configured in `pyproject.toml`:
+
+```bash
+# Run Ruff linter
+ruff check
+
+# Run Ruff formatter
+ruff format --check
+
+# Run Mypy static type checker
+mypy src
+```
