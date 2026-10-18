@@ -27,6 +27,7 @@ DEFAULT_DESIRABILITY_PATH = [
 DESIRABILITY_PATH = DEFAULT_DESIRABILITY_PATH
 
 _MODEL_POOL_CACHE: dict[str, list[str]] = {}
+_EXHAUSTED_MODELS: set[str] = set()
 
 
 def discover_model_pool(client: genai.Client | None = None, strategy: str = "quality") -> list[str]:
@@ -101,8 +102,14 @@ def is_daily_quota_exhausted(exc: BaseException) -> bool:
 
 
 def generate_with_fallback(client: genai.Client, contents: list, model_pool: list[str]) -> tuple[str, str]:
-    """Tries generation along the desirability path, cascading on exhaustion or failure."""
+    """Tries generation along the desirability path, cascading on exhaustion or failure.
+
+    Models that hit daily quota limits are cached in-memory and skipped for subsequent calls.
+    """
     for model in model_pool:
+        if model in _EXHAUSTED_MODELS:
+            continue
+
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] Attempting generation with {model}...")
 
@@ -119,6 +126,7 @@ def generate_with_fallback(client: genai.Client, contents: list, model_pool: lis
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 if is_daily_quota_exhausted(e):
                     print(f"[{ts}] [!] Daily quota exhausted for {model}. Cascading to next model...")
+                    _EXHAUSTED_MODELS.add(model)
                     break  # Break inner loop to trigger next model in pool
 
                 if attempt == 3:

@@ -82,6 +82,9 @@ UNIVERSAL_INLINE_FIXES = {
     r"can use to throw this pouch": "can use [1 Action] to throw this pouch",
     r"used as to light abundant fuel": "used as [1 Action] to light abundant fuel",
     r"same duration by using \.": "same duration by using [1 Action].",
+    # Chapter 7 Table Spill Fixes
+    r"expend the\s*\|\s*-\s*\|": "expend the ammunition from that chamber. | - |",
+    r"\|\s*Suppressor\s*\|\s*ammunition from that chamber\.\s*": "| Suppressor | ",
 }
 
 

@@ -7,6 +7,7 @@ from google.genai import errors
 
 from ttrpg_markdown_pipeline.extractors.docling import convert_pdf
 from ttrpg_markdown_pipeline.extractors.gemini import (
+    _EXHAUSTED_MODELS,
     _MODEL_POOL_CACHE,
     DEFAULT_DESIRABILITY_PATH,
     chunk_file_for,
@@ -50,16 +51,29 @@ def test_generate_with_fallback_success():
 def test_generate_with_fallback_cascades_on_daily_quota():
     client = MagicMock()
 
-    # Model A exhausts daily quota; Model B succeeds
+    # Clear exhausted cache before test
+    _EXHAUSTED_MODELS.clear()
+
+    # First call: Model A exhausts daily quota; Model B succeeds
     quota_error = errors.APIError(429, {"error": {"message": "Resource exhausted: please retry in 12h"}})
     success_resp = MagicMock()
     success_resp.text = "Success on backup model"
 
-    client.models.generate_content.side_effect = [quota_error, success_resp]
+    client.models.generate_content.side_effect = [quota_error, success_resp, success_resp]
 
     text, model = generate_with_fallback(client, ["content"], ["model-a", "model-b"])
     assert text == "Success on backup model"
     assert model == "model-b"
+    assert "model-a" in _EXHAUSTED_MODELS
+
+    # Second call: Model A is already in _EXHAUSTED_MODELS, so it immediately calls Model B without trying Model A
+    client.models.generate_content.reset_mock()
+    client.models.generate_content.return_value = success_resp
+    text2, model2 = generate_with_fallback(client, ["chunk 2"], ["model-a", "model-b"])
+    assert text2 == "Success on backup model"
+    assert model2 == "model-b"
+    assert client.models.generate_content.call_count == 1
+    assert client.models.generate_content.call_args.kwargs["model"] == "model-b"
 
 
 def test_generate_with_fallback_all_fail_raises():
