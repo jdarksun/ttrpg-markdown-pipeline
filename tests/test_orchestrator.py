@@ -16,6 +16,8 @@ from ttrpg_markdown_pipeline.orchestrator import (
 def test_sanitize_filename():
     assert sanitize_filename('Chapter: "Combat" & Actions?') == "Chapter Combat & Actions"
     assert sanitize_filename("Path/To/File|Name*") == "PathToFileName"
+    assert sanitize_filename("Chapter 1\n - The World\r\n") == "Chapter 1 - The World"
+    assert sanitize_filename("Title\twith\n\nmultiple   spaces") == "Title with multiple spaces"
 
 
 def test_split_pdf_by_chapters(sample_pdf_with_toc: Path, tmp_path: Path):

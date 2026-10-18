@@ -24,8 +24,13 @@ class Chapter:
 
 
 def sanitize_filename(name: str) -> str:
-    """Removes invalid filename characters."""
-    return re.sub(r'[\\/*?:"<>|]', "", name).strip()
+    """Removes invalid filename characters, control characters, and collapses whitespace."""
+    # Replace newlines, carriage returns, and tabs with a single space
+    cleaned = re.sub(r"[\r\n\t]+", " ", name)
+    # Remove characters forbidden on Windows and Unix file systems
+    cleaned = re.sub(r'[\\/*?:"<>|]', "", cleaned)
+    # Collapse multiple consecutive whitespace characters and trim
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def split_pdf_by_chapters(pdf_path: Path, output_dir: Path) -> list[Chapter]:
