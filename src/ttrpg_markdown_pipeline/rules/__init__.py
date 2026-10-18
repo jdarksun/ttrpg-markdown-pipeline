@@ -13,4 +13,3 @@ __all__ = [
     "UNIVERSAL_INLINE_FIXES",
     "patch_cosmere_rules",
 ]
-

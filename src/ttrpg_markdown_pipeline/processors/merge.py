@@ -10,8 +10,8 @@ from ttrpg_markdown_pipeline.rules.cosmere import UNIVERSAL_INLINE_FIXES
 def extract_talent_metadata(gemini_text: str) -> dict[str, dict[str, str]]:
     """Extracts a lookup table of {talent_name: {prereq, act}} from Gemini output."""
     pattern = re.compile(
-        r"#{2,4}\s+([A-Za-z0-9 ’'!\-()]+?)(?:\s*\([^)]*\))?\n[\s\(\S\)]*?"
-        r"(?:[-*]\s*)?\*\*Prerequisites?:\*\*\s*(.*?)\n"
+        r"#{2,4}\s+([A-Za-z0-9 ’'!\-()]+?)(?:\s*\([^)]*\))?\s*\r?\n[\s\(\S\)]*?"
+        r"(?:[-*]\s*)?\*\*Prerequisites?:\*\*\s*(.*?)\r?\n\s*"
         r"(?:[-*]\s*)?\*\*Activation:\*\*\s*[`*]?(\[[^\]]+\]|"
         r"Special Activation|Special|Passive|Always Active)[`*]?",
         re.MULTILINE | re.IGNORECASE,
@@ -171,4 +171,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

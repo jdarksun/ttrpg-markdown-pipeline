@@ -77,7 +77,9 @@ UNIVERSAL_INLINE_FIXES = {
 def patch_cosmere_rules(text: str) -> str:
     """Post-processing regex cleanup specifically for Cosmere RPG Markdown output."""
     # 1. Introduction Action Economy definitions
-    text = re.sub(r"Actions\s*\(\s*\)\.", "Actions ([1 / 2 / 3 Actions]).", text)
+    text = re.sub(r"Free Actions\s*\(\s*\)\.", "Free Actions ([Free Action]).", text)
+    text = re.sub(r"Reactions\s*\(\s*\)\.", "Reactions ([Reaction]).", text)
+    text = re.sub(r"(?<!Free )Actions\s*\(\s*\)\.", "Actions ([1 / 2 / 3 Actions]).", text)
     text = re.sub(
         r"requires one action, it's labeled\s*;\s*"
         r"if it requires two actions, it's labeled\s*;\s*"
@@ -87,8 +89,6 @@ def patch_cosmere_rules(text: str) -> str:
         "and if it requires three actions, it's labeled [3 Actions].",
         text,
     )
-    text = re.sub(r"Reactions\s*\(\s*\)\.", "Reactions ([Reaction]).", text)
-    text = re.sub(r"Free Actions\s*\(\s*\)\.", "Free Actions ([Free Action]).", text)
 
     # 2. Plot Die Symbols
     text = re.sub(r"Opportunity symbol\s*\(\s*\)", "Opportunity symbol ([Opportunity])", text)
@@ -108,4 +108,3 @@ def patch_cosmere_rules(text: str) -> str:
     text = re.sub(r"^Activation:\s*$", "Activation: [Passive / Varies]", text, flags=re.MULTILINE)
 
     return text
-

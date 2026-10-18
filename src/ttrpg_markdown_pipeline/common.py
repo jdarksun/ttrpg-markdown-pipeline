@@ -9,8 +9,8 @@ ALL_TAGS = (DOCLING_TAG, GEMINI_TAG, MERGED_TAG)
 
 
 def clean_path(path_str: str) -> Path:
-    """Strip accidental quotes caused by Windows shell trailing backslash escapes."""
-    return Path(path_str.rstrip("\"'").strip())
+    """Strip accidental quotes caused by Windows shell trailing backslash escapes or quoted inputs."""
+    return Path(path_str.strip().strip("\"'").strip())
 
 
 def strip_tags(stem: str) -> str:
