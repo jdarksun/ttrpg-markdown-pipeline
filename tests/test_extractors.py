@@ -7,9 +7,16 @@ from google.genai import errors
 
 from ttrpg_markdown_pipeline.extractors.docling import convert_pdf
 from ttrpg_markdown_pipeline.extractors.gemini import (
+    _MODEL_POOL_CACHE,
+    DEFAULT_DESIRABILITY_PATH,
     chunk_file_for,
+    discover_model_pool,
+    extract_pdf as gemini_extract_pdf,
     generate_with_fallback,
     is_daily_quota_exhausted,
+)
+from ttrpg_markdown_pipeline.extractors.gemini import (
+    extract_pdf as gemini_extract_pdf,
 )
 from ttrpg_markdown_pipeline.extractors.pymupdf import extract_pdf
 
@@ -92,3 +99,120 @@ def test_pymupdf_extract_pdf(tmp_path: Path):
     assert res == out
     assert out.exists()
     assert "Sample Rules Heading" in out.read_text(encoding="utf-8")
+
+
+def test_discover_model_pool_strategies():
+    mock_client = MagicMock()
+    m1 = MagicMock(supported_actions=["generateContent"])
+    m1.name = "models/gemini-2.5-flash"
+    m2 = MagicMock(supported_actions=["generateContent"])
+    m2.name = "models/gemini-3.8-flash"
+    m3 = MagicMock(supported_actions=["generateContent"])
+    m3.name = "models/gemini-3.5-flash-lite"
+    m4 = MagicMock(supported_actions=["generateContent"])
+    m4.name = "models/gemini-3.1-flash-lite"
+    m_skip = MagicMock(supported_actions=["generateContent"])
+    m_skip.name = "models/gemini-3.8-flash-tts"
+
+    mock_client.models.list.return_value = [m1, m2, m3, m4, m_skip]
+
+    _MODEL_POOL_CACHE.clear()
+    quality_pool = discover_model_pool(mock_client, strategy="quality")
+    assert quality_pool == [
+        "gemini-3.8-flash",
+        "gemini-2.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+    ]
+
+    _MODEL_POOL_CACHE.clear()
+    quota_pool = discover_model_pool(mock_client, strategy="quota")
+    assert quota_pool == [
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-3.8-flash",
+        "gemini-2.5-flash",
+    ]
+
+
+def test_discover_model_pool_fallback_on_error():
+    mock_client = MagicMock()
+    mock_client.models.list.side_effect = Exception("Network unreachable")
+
+    _MODEL_POOL_CACHE.clear()
+    pool = discover_model_pool(mock_client, strategy="quality")
+    assert pool == DEFAULT_DESIRABILITY_PATH
+
+
+def test_gemini_extract_pdf_creates_cache_and_output(tmp_path: Path):
+    pdf = tmp_path / "sample.pdf"
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "Page 1 rules")
+    doc.new_page().insert_text((72, 72), "Page 2 rules")
+    doc.save(pdf)
+    doc.close()
+
+    out_md = tmp_path / "output_dir" / "sample - GEMINI.md"
+
+    mock_client = MagicMock()
+    mock_upload = MagicMock()
+    mock_upload.name = "files/test_file_123"
+    mock_client.files.upload.return_value = mock_upload
+
+    mock_resp = MagicMock()
+    mock_resp.text = "Extracted Markdown Chunk"
+    mock_client.models.generate_content.return_value = mock_resp
+
+    result = gemini_extract_pdf(
+        pdf_path=pdf,
+        output_path=out_md,
+        chunk_size=1,
+        client=mock_client,
+        model_pool=["gemini-3.8-flash"],
+    )
+
+    assert result == out_md
+    assert out_md.exists()
+    assert "Extracted Markdown Chunk" in out_md.read_text(encoding="utf-8")
+
+    cache_dir = tmp_path / "output_dir" / f".cache_{out_md.stem}"
+    assert cache_dir.exists()
+    assert (cache_dir / "chunk_001_001.md").exists()
+    assert (cache_dir / "chunk_002_002.md").exists()
+
+
+def test_gemini_extract_pdf_creates_cache_and_output(tmp_path: Path):
+    pdf = tmp_path / "sample.pdf"
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "Page 1 rules")
+    doc.new_page().insert_text((72, 72), "Page 2 rules")
+    doc.save(pdf)
+    doc.close()
+
+    out_md = tmp_path / "output_dir" / "sample - GEMINI.md"
+
+    mock_client = MagicMock()
+    mock_upload = MagicMock()
+    mock_upload.name = "files/test_file_123"
+    mock_client.files.upload.return_value = mock_upload
+
+    mock_resp = MagicMock()
+    mock_resp.text = "Extracted Markdown Chunk"
+    mock_client.models.generate_content.return_value = mock_resp
+
+    result = gemini_extract_pdf(
+        pdf_path=pdf,
+        output_path=out_md,
+        chunk_size=1,
+        client=mock_client,
+        model_pool=["gemini-3.8-flash"],
+    )
+
+    assert result == out_md
+    assert out_md.exists()
+    assert "Extracted Markdown Chunk" in out_md.read_text(encoding="utf-8")
+
+    cache_dir = tmp_path / "output_dir" / f".cache_{out_md.stem}"
+    assert cache_dir.exists()
+    assert (cache_dir / "chunk_001_001.md").exists()
+    assert (cache_dir / "chunk_002_002.md").exists()

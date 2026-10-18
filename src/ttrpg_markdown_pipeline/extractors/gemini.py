@@ -1,4 +1,5 @@
 import argparse
+import re
 import tempfile
 import time
 from datetime import datetime
@@ -11,14 +12,86 @@ from google.genai import errors
 from ttrpg_markdown_pipeline.common import GEMINI_TAG, clean_path, load_env_file, resolve_md_output
 from ttrpg_markdown_pipeline.rules.cosmere import DEFAULT_PROMPT
 
-# Ranked by daily capacity and generation capability
-DESIRABILITY_PATH = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
+# Default static fallback if API dynamic discovery is unavailable
+DEFAULT_DESIRABILITY_PATH = [
+    "gemini-3.8-flash",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
+    "gemini-2.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
 ]
+DESIRABILITY_PATH = DEFAULT_DESIRABILITY_PATH
+
+_MODEL_POOL_CACHE: dict[str, list[str]] = {}
+
+
+def discover_model_pool(client: genai.Client | None = None, strategy: str = "quality") -> list[str]:
+    """Dynamically queries Gemini API for available models, filtered and sorted by strategy.
+
+    Strategies:
+      - 'quality': Prioritizes standard Flash models by version (newest first), then Flash-Lite.
+      - 'quota': Prioritizes Flash-Lite models by version (newest first), then standard Flash.
+
+    Results are cached in-memory per strategy so discovery runs at most once per session.
+    """
+    if strategy in _MODEL_POOL_CACHE:
+        return _MODEL_POOL_CACHE[strategy]
+
+    if client is None:
+        try:
+            load_env_file()
+            client = genai.Client()
+        except Exception:
+            return DEFAULT_DESIRABILITY_PATH
+
+    try:
+        pattern = re.compile(r"^gemini-(\d+(?:\.\d+)?)-(flash(?:-lite)?)$")
+        matches: list[tuple[str, str, tuple[int, ...]]] = []
+
+        for m in client.models.list():
+            if not m.name:
+                continue
+            clean = m.name.removeprefix("models/")
+            res = pattern.match(clean)
+            if res and "generateContent" in getattr(m, "supported_actions", []):
+                ver_str, flavor = res.groups()
+                parts = tuple(int(p) for p in ver_str.split("."))
+                if len(parts) == 1:
+                    parts = (parts[0], 0)
+                matches.append((clean, flavor, parts))
+
+        if not matches:
+            return DEFAULT_DESIRABILITY_PATH
+
+        if strategy == "quota":
+            # Flash-Lite tier 2, Flash tier 1 -> descending puts Flash-Lite first
+            sorted_models = [
+                m[0]
+                for m in sorted(
+                    matches,
+                    key=lambda x: (2 if x[1] == "flash-lite" else 1, x[2]),
+                    reverse=True,
+                )
+            ]
+        else:
+            # Quality: Flash tier 2, Flash-Lite tier 1 -> descending puts Flash first
+            sorted_models = [
+                m[0]
+                for m in sorted(
+                    matches,
+                    key=lambda x: (2 if x[1] == "flash" else 1, x[2]),
+                    reverse=True,
+                )
+            ]
+
+        _MODEL_POOL_CACHE[strategy] = sorted_models
+        return sorted_models
+    except Exception as e:
+        print(f"[!] Warning: Could not dynamically list Gemini models ({e}). Using static fallback.")
+        return DEFAULT_DESIRABILITY_PATH
 
 
 def is_daily_quota_exhausted(exc: BaseException) -> bool:
@@ -69,6 +142,7 @@ def extract_pdf(
     chunk_size: int = 8,
     prompt: str = DEFAULT_PROMPT,
     model_pool: list[str] | None = None,
+    strategy: str = "quality",
     client: genai.Client | None = None,
 ) -> Path:
     """Extract a PDF to Markdown via Gemini Vision, chunked and cached per output file.
@@ -83,6 +157,7 @@ def extract_pdf(
     cache_dir = output_path.parent / f".cache_{output_path.stem}"
     if legacy_cache.exists() and not cache_dir.exists():
         legacy_cache.rename(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
     load_env_file()
     try:
         client = client or genai.Client()
@@ -93,7 +168,11 @@ def extract_pdf(
                 "or create a .env file in your project root containing: GEMINI_API_KEY=your_key_here"
             ) from None
         raise
-    model_pool = model_pool or DESIRABILITY_PATH
+
+    if model_pool is None:
+        model_pool = discover_model_pool(client, strategy=strategy)
+
+    print(f"Active model pool ({strategy}): {', '.join(model_pool)}")
     doc = pymupdf.open(pdf_path)
     total_pages = len(doc)
     chunk_ranges = [(s, min(s + chunk_size, total_pages)) for s in range(0, total_pages, chunk_size)]
@@ -161,13 +240,27 @@ def main() -> None:
         default=8,
         help="Number of pages per processing chunk (default: 8)",
     )
+    parser.add_argument(
+        "--strategy",
+        choices=["quality", "quota"],
+        default="quality",
+        help="Model cascade strategy: 'quality' prefers highest-capability Flash models; "
+        "'quota' prefers highest-rate-limit Flash-Lite models (default: quality).",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Explicit Gemini model to use instead of dynamic discovery (e.g. gemini-3.8-flash).",
+    )
     args = parser.parse_args()
 
     if not args.pdf_path.is_file():
         raise FileNotFoundError(f"PDF not found: {args.pdf_path}")
 
+    model_pool = [args.model] if args.model else None
     output_path = resolve_md_output(args.output, args.pdf_path.parent, args.pdf_path.stem, GEMINI_TAG)
-    extract_pdf(args.pdf_path, output_path, chunk_size=args.chunk_size)
+    extract_pdf(args.pdf_path, output_path, chunk_size=args.chunk_size, model_pool=model_pool, strategy=args.strategy)
 
 
 if __name__ == "__main__":

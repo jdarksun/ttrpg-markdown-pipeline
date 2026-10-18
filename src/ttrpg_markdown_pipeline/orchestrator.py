@@ -116,6 +116,7 @@ def process_chapter(
     force: bool,
     docling_only: bool,
     chunk_size: int,
+    gemini_strategy: str = "quality",
 ) -> Path:
     """Run the extraction pipeline for one chapter and return the path of its final Markdown file."""
     stem = chap.path.stem
@@ -138,7 +139,7 @@ def process_chapter(
             print(f"       -> Skipping (already exists): {gemini_md.name}")
         else:
             # Resumes from per-chapter chunk cache if a previous run was interrupted
-            extract_pdf(chap.path, gemini_md, chunk_size=chunk_size)
+            extract_pdf(chap.path, gemini_md, chunk_size=chunk_size, strategy=gemini_strategy)
 
         print("  -> Phase 3: Merging Docling and Gemini")
         final_md = tagged_md_path(md_out_dir, stem, MERGED_TAG)
@@ -183,6 +184,15 @@ def main() -> None:
         default=8,
         help="Pages per Gemini request (default: 8).",
     )
+    parser.add_argument(
+        "--strategy",
+        "--gemini-strategy",
+        dest="gemini_strategy",
+        choices=["quality", "quota"],
+        default="quality",
+        help="Gemini model cascade strategy: 'quality' prefers highest-capability Flash models; "
+        "'quota' prefers highest-rate-limit Flash-Lite models (default: quality).",
+    )
     args = parser.parse_args()
 
     if not args.pdf_path.is_file():
@@ -216,6 +226,7 @@ def main() -> None:
                 force=args.force,
                 docling_only=args.docling_only,
                 chunk_size=args.chunk_size,
+                gemini_strategy=args.gemini_strategy,
             )
             print(f"  [SUCCESS] {chap.path.name} -> {final_md.name}")
         except Exception as e:  # noqa: BLE001 - keep going so one bad chapter doesn't stop the book
