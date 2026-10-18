@@ -12,6 +12,8 @@ def test_patch_cosmere_rules():
         "action as . Before you take damage\n"
         "Recover action as .\n"
         "## Flowchart Step 8\n"
+        "## Cadmium Allomancy Era 2\n"
+        "## Tier 2\n"
         "Activation:\n"
     )
 
@@ -25,7 +27,9 @@ def test_patch_cosmere_rules():
     assert "As [1 Action], you can move." in patched
     assert "action as [Reaction]. Before you take damage" in patched
     assert "Recover action as [1 Action]." in patched
-    assert "## Flowchart Step" in patched
+    assert "## Flowchart Step\n" in patched
+    assert "## Cadmium Allomancy Era 2" in patched
+    assert "## Tier 2" in patched
     assert "Activation: [Passive / Varies]" in patched
 
 

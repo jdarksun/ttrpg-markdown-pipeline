@@ -60,6 +60,24 @@ Recover action as .
 ## Iron Will
 You steel your mind against cognitive tests.
 gain for cognitive tests.
+
+## Mistborn History
+This is pure lore and must not become a talent.
+
+## Alloyed Resonance
+- Prerequisite: Your Twinborn Heritage
+## Activation:
+Resonance description.
+
+## Instinctual Burn
+Prerequisite: Misting Snap
+Activation:
+Burn text 1.
+
+## Instinctual Burn
+Prerequisite: Mistborn Snap
+Activation:
+Burn text 2.
 """
 
     gemini_text = """
@@ -70,6 +88,18 @@ gain for cognitive tests.
 ### Iron Will
 - **Prerequisites:** Resolve 12
 - **Activation:** [Passive]
+
+### Alloyed Resonance
+- **Prerequisites:** Your Twinborn Heritage; Invested talent
+- **Activation:** [Special Activation]
+
+### Instinctual Burn
+- **Prerequisites:** Allomancy 3+; Misting Snap key talent
+- **Activation:** [Special Activation]
+
+### Instinctual Burn
+- **Prerequisites:** Allomancy 3+; Mistborn Snap key talent
+- **Activation:** [Special Activation]
 """
 
     docling_file.write_text(docling_text, encoding="utf-8")
@@ -91,6 +121,18 @@ gain for cognitive tests.
 
     # Universal inline fix verification:
     assert "gain [2 Actions] for cognitive tests." in merged_text
+
+    # Non-talent header guardrail verification:
+    assert "## Mistborn History" in merged_text
+    assert "### Mistborn History" not in merged_text
+
+    # Phantom dash heading prevention verification:
+    assert "### Alloyed Resonance" in merged_text
+    assert "### -" not in merged_text
+
+    # Occurrence-aware sequential resolution verification:
+    assert "- **Prerequisites:** Allomancy 3+; Misting Snap key talent" in merged_text
+    assert "- **Prerequisites:** Allomancy 3+; Mistborn Snap key talent" in merged_text
 
 
 def test_patch_file(tmp_path: Path):

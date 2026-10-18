@@ -6,33 +6,149 @@ from pathlib import Path
 from ttrpg_markdown_pipeline.common import DOCLING_TAG, GEMINI_TAG, MERGED_TAG, clean_path, strip_tags, tagged_md_path
 from ttrpg_markdown_pipeline.rules.cosmere import UNIVERSAL_INLINE_FIXES
 
+NON_TALENT_HEADERS: set[str] = {
+    # Section overviews & sidebars
+    "using metalborn paths",
+    "using paths and talents",
+    "metalborn path options",
+    "choosing powers",
+    "choosing a snap or heritage talent",
+    "using invested skills",
+    "hemalurgy in the cosmere rpg",
+    "randomizing your metalborn path",
+    "randomizing your misting power",
+    "randomizing your feruchemical power",
+    "randomizing your twinborn powers",
+    "burning rare metals",
+    "managing metals",
+    "consuming impure metal",
+    "becoming depleted of rare metals",
+    "metallic art discovery",
+    "allomancy discovery",
+    "feruchemy discovery",
+    "spending investiture",
+    "refreshing metal reserves",
+    "metals from other sources",
+    "acquiring metalminds",
+    "storing traits in metalminds",
+    "tapping metalminds",
+    "multiple metalminds",
+    "maintaining metalminds",
+    "metalborn goals and rewards",
+    "allomancy: using investiture",
+    "allomancy: training in the allomantic arts",
+    "feruchemy: using metalminds",
+    "feruchemy: constructing a metalmind",
+    "intuitive atium",
+    "exploring resonances",
+    "compounders",
+    "manifestations of savantism",
+    # History headers
+    "mistborn history",
+    "feruchemist history",
+    "ferring history",
+    "twinborn history",
+    # Path & tree intro headers
+    "misting",
+    "mistborn",
+    "feruchemist",
+    "ferring",
+    "twinborn",
+    "misting talents",
+    "mistborn talents",
+    "feruchemist talents",
+    "ferring talents",
+    "twinborn talents",
+    # Flowchart / table legends
+    "icon meaning",
+    "icon",
+    "meaning",
+}
 
-def extract_talent_metadata(gemini_text: str) -> dict[str, dict[str, str]]:
-    """Extracts a lookup table of {talent_name: {prereq, act}} from Gemini output."""
+
+class TalentMetadata(dict[str, dict[str, str]]):
+    """Stores talent metadata as a dictionary of {clean_name: default_entry},
+    while tracking multiple occurrences in encounter order for sequential resolution.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._occurrences: dict[str, list[dict[str, str]]] = {}
+        self._consumed: dict[str, int] = {}
+
+    def add_entry(self, clean_name: str, entry: dict[str, str]) -> None:
+        if clean_name not in self._occurrences:
+            self._occurrences[clean_name] = []
+            self[clean_name] = entry  # Default for dict backward compatibility
+        self._occurrences[clean_name].append(entry)
+
+    def get_occurrence(self, lookup_name: str, docling_prereq: str | None = None) -> dict[str, str] | None:
+        entries = self._occurrences.get(lookup_name)
+        if not entries:
+            # Substring match if exact match not found
+            for k, v in self._occurrences.items():
+                if k == lookup_name or k in lookup_name or lookup_name in k:
+                    entries = v
+                    lookup_name = k
+                    break
+
+        if not entries:
+            return None
+
+        # If multiple entries and docling_prereq provided, match prerequisite keywords
+        if len(entries) > 1 and docling_prereq:
+            clean_dp = " ".join(docling_prereq.lower().split())
+            for ent in entries:
+                clean_ep = ent["prereq"].lower()
+                if clean_dp in clean_ep or clean_ep in clean_dp:
+                    return ent
+
+        # Sequential cursor consumption
+        idx = self._consumed.get(lookup_name, 0)
+        selected_idx = min(idx, len(entries) - 1)
+        self._consumed[lookup_name] = idx + 1
+        return entries[selected_idx]
+
+    def all_occurrences(self) -> list[dict[str, str]]:
+        result = []
+        for entries in self._occurrences.values():
+            result.extend(entries)
+        return result
+
+
+def extract_talent_metadata(gemini_text: str) -> TalentMetadata:
+    """Extracts a lookup table of {talent_name: {prereq, act}} from Gemini output without crossing header boundaries."""
     pattern = re.compile(
-        r"#{2,4}\s+([A-Za-z0-9 ’'!\-()]+?)(?:\s*\([^)]*\))?\s*\r?\n[\s\(\S\)]*?"
+        r"#{2,4}\s+([A-Za-z0-9 ’'!\-()]+?)(?:\s*\([^)]*\))?\r?\n"
+        r"((?:(?!^\s*#{1,4}\s).)*?)"
         r"(?:[-*]\s*)?\*\*Prerequisites?:\*\*\s*(.*?)\r?\n\s*"
         r"(?:[-*]\s*)?\*\*Activation:\*\*\s*[`*]?(\[[^\]]+\]|"
         r"Special Activation|Special|Passive|Always Active)[`*]?",
-        re.MULTILINE | re.IGNORECASE,
+        re.MULTILINE | re.DOTALL | re.IGNORECASE,
     )
-    metadata = {}
+    metadata = TalentMetadata()
     for m in pattern.finditer(gemini_text):
         raw_name = m.group(1).strip()
         clean_name = re.sub(r"\s*\([^)]*\)", "", raw_name).strip().lower()
-        prereq = m.group(2).strip("`* ")
-        act = m.group(3).strip("`* ")
+        if clean_name in NON_TALENT_HEADERS or not any(c.isalpha() for c in clean_name):
+            continue
 
-        if act in ("Special", "Special Activation"):
+        prereq = m.group(3).strip("`* ")
+        act = m.group(4).strip("`* ")
+
+        if act in ("Special", "Special Activation", "[Special Activation]"):
             act = "[Special Activation]"
-        elif act in ("Passive", "Always Active"):
+        elif act in ("Passive", "Always Active", "[Passive]", "[Always Active]"):
             act = "[Passive]"
 
-        metadata[clean_name] = {
-            "raw_name": raw_name,
-            "prereq": prereq,
-            "act": act,
-        }
+        metadata.add_entry(
+            clean_name,
+            {
+                "raw_name": raw_name,
+                "prereq": prereq,
+                "act": act,
+            },
+        )
     return metadata
 
 
@@ -50,31 +166,44 @@ def merge_chapter(
     metadata = extract_talent_metadata(gemini_text)
     print(f"  -> Extracted {len(metadata)} mechanics from Gemini.")
 
-    # Primary Pass: Finds compressed Docling lines (e.g. ## Name Prerequisite: X Activation:)
+    # Primary Pass: Matches single-line compressed Docling headers AND multiline split headers
     header_regex = re.compile(
-        r"^(?:##\s*)?([A-Za-z0-9 ’'!\-()]+?)\s*\n*"
-        r"(?:(?:##\s*)?Prerequisite:\s*((?:(?!Activation:|Prerequisite:).)*?)\s*\n*)?"
-        r"(?:##\s*)?Activation:\s*$",
-        re.MULTILINE | re.DOTALL,
+        r"^(?:##\s*|###\s*)?([A-Za-z0-9 ’'!\-()]+?)\s*\n*"
+        r"(?:(?:##\s*|###\s*|[-*]\s*)?Prerequisites?:\s*((?:(?!Activation:|Prerequisites?:)[^\n])+(?:\n[^\n#]+)?)\s*\n*)?"
+        r"(?:##\s*|###\s*|[-*]\s*)?Activation:\s*$",
+        re.MULTILINE | re.IGNORECASE,
     )
+
+    matched_talents: set[str] = set()
 
     def format_header(match: re.Match[str]) -> str:
         raw_name = match.group(1).strip()
+        clean_raw_name = re.sub(r"^[-*#\s]+", "", raw_name).strip()
+        lookup_name = re.sub(r"\s*\([^)]*\)", "", clean_raw_name).strip().lower()
+
+        # Abort if name is invalid, a lone dash/bullet, lacks letters, or is a known non-talent section
+        if (
+            not clean_raw_name
+            or clean_raw_name in ("-", "*")
+            or not re.search(r"[A-Za-z]{2,}", clean_raw_name)
+            or lookup_name in NON_TALENT_HEADERS
+        ):
+            return match.group(0)
+
+        matched_talents.add(lookup_name)
+
         docling_prereq = match.group(2)
-        lookup_name = re.sub(r"\s*\([^)]*\)", "", raw_name).strip().lower()
-
+        prereq = " ".join(docling_prereq.split()) if docling_prereq else "None"
         act = "[Special Activation]"
-        prereq = docling_prereq if docling_prereq else "None"
-        prereq = " ".join(prereq.split())  # Flatten inner newlines
 
-        # Inject clean Gemini metadata if matched
-        for k, v in metadata.items():
-            if k == lookup_name or k in lookup_name or lookup_name in k:
-                act = v["act"]
-                prereq = v["prereq"]
-                break
+        # Inject clean Gemini metadata if matched (occurrence-aware)
+        match_meta = metadata.get_occurrence(lookup_name, docling_prereq=docling_prereq)
+        if match_meta:
+            act = match_meta["act"]
+            if match_meta["prereq"].lower() != "none":
+                prereq = match_meta["prereq"]
 
-        out = [f"### {raw_name}"]
+        out = [f"### {clean_raw_name}"]
         if prereq and prereq.lower() != "none":
             out.append(f"- **Prerequisites:** {prereq}")
         elif prereq.lower() == "none":
@@ -85,7 +214,12 @@ def merge_chapter(
     patched_text = header_regex.sub(format_header, docling_text)
 
     # Fallback Pass: Fix talents that lost their "Activation:" string entirely in Docling
-    for v in metadata.values():
+    # (Skip any talents already converted in the primary pass to prevent converting flowchart summaries)
+    for v in metadata.all_occurrences():
+        clean_v = re.sub(r"^[-*#\s]+", "", v["raw_name"])
+        clean_v = re.sub(r"\s*\([^)]*\)", "", clean_v).strip().lower()
+        if clean_v in NON_TALENT_HEADERS or clean_v in matched_talents:
+            continue
         raw_escaped = re.escape(v["raw_name"])
         fallback_regex = re.compile(
             rf"^##\s+({raw_escaped}(?:\s*\([^)]*\))?)\s*\n+(?!- \*\*Prerequisites)",

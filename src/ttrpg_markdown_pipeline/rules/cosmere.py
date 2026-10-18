@@ -100,8 +100,9 @@ def patch_cosmere_rules(text: str) -> str:
     text = re.sub(r"Recover action as\s*\.", "Recover action as [1 Action].", text)
     text = re.sub(r"Interact action as\s*\.", "Interact action as [1 Action].", text)
 
-    # 4. Clean RapidOCR digit artifacts in headings from flowchart icons
-    text = re.sub(r"^(##\s+[A-Za-z\s]+?)\s+[28]$", r"\1", text, flags=re.MULTILINE)
+    # 4. Clean RapidOCR digit artifacts in headings from flowchart icons (e.g. '## Fast Tapping 2')
+    # Preserves legitimate numeral suffixes like 'Era 2' or 'Tier 2'
+    text = re.sub(r"^(##\s+[A-Za-z\s]+?(?<!\bEra)(?<!\bTier))\s+[28]$", r"\1", text, flags=re.MULTILINE)
     text = re.sub(r"^##\s+2\s+([A-Za-z\s]+)$", r"## \1", text, flags=re.MULTILINE)
 
     # 5. Fix standalone blank 'Activation:' lines
