@@ -35,4 +35,3 @@ def bare_pdf(tmp_path: Path) -> Generator[Path, None, None]:
     doc.close()
 
     yield pdf_path
-

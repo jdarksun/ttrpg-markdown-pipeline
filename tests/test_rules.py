@@ -35,4 +35,3 @@ def test_mechanics_keyword_matching():
     assert any(kw in "Metallic Arts".lower() for kw in MECHANICS_KEYWORDS)
     assert any(kw in "Adversaries".lower() for kw in MECHANICS_KEYWORDS)
     assert not any(kw in "World of Scadrial Overview".lower() for kw in MECHANICS_KEYWORDS)
-

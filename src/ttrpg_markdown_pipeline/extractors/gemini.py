@@ -8,7 +8,7 @@ import pymupdf
 from google import genai
 from google.genai import errors
 
-from ttrpg_markdown_pipeline.common import GEMINI_TAG, clean_path, resolve_md_output
+from ttrpg_markdown_pipeline.common import GEMINI_TAG, clean_path, load_env_file, resolve_md_output
 from ttrpg_markdown_pipeline.rules.cosmere import DEFAULT_PROMPT
 
 # Ranked by daily capacity and generation capability
@@ -83,9 +83,16 @@ def extract_pdf(
     cache_dir = output_path.parent / f".cache_{output_path.stem}"
     if legacy_cache.exists() and not cache_dir.exists():
         legacy_cache.rename(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    client = client or genai.Client()
+    load_env_file()
+    try:
+        client = client or genai.Client()
+    except Exception as e:
+        if "API key" in str(e):
+            raise ValueError(
+                "Gemini API key not found. Please set the GEMINI_API_KEY environment variable "
+                "or create a .env file in your project root containing: GEMINI_API_KEY=your_key_here"
+            ) from None
+        raise
     model_pool = model_pool or DESIRABILITY_PATH
     doc = pymupdf.open(pdf_path)
     total_pages = len(doc)

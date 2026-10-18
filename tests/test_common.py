@@ -51,3 +51,18 @@ def test_resolve_md_output(tmp_path: Path):
     res = resolve_md_output(file_path, d, stem, GEMINI_TAG)
     assert res == tmp_path / f"custom_file{GEMINI_TAG}.md"
 
+
+def test_load_env_file(tmp_path: Path, monkeypatch):
+    import os
+
+    from ttrpg_markdown_pipeline.common import load_env_file
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("GEMINI_API_KEY=test_secret_key_123\n# A comment\nOTHER_VAR='hello'", encoding="utf-8")
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    load_env_file()
+    assert os.environ.get("GEMINI_API_KEY") == "test_secret_key_123"
+    assert os.environ.get("OTHER_VAR") == "hello"

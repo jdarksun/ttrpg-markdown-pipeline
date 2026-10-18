@@ -18,4 +18,3 @@ def test_inspect_glyphs_runs_cleanly(tmp_path: Path, capsys: pytest.CaptureFixtu
     # Verify no unhandled crash occurred
     captured = capsys.readouterr()
     assert captured.err == ""
-

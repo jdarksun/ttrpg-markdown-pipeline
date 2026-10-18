@@ -1,6 +1,20 @@
-"""Shared helpers and naming conventions used across the pipeline modules."""
-
+import os
 from pathlib import Path
+
+
+def load_env_file() -> None:
+    """Load environment variables from .env or .env.local if present and not already in os.environ."""
+    for search_dir in [Path.cwd(), Path(__file__).resolve().parents[2]]:
+        for fname in [".env", ".env.local"]:
+            env_file = search_dir / fname
+            if env_file.is_file():
+                for line in env_file.read_text(encoding="utf-8").splitlines():
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith("#") and "=" in stripped:
+                        key, val = stripped.split("=", 1)
+                        os.environ.setdefault(key.strip(), val.strip().strip("\"'"))
+                return
+
 
 DOCLING_TAG = " - DOCLING"
 GEMINI_TAG = " - GEMINI"

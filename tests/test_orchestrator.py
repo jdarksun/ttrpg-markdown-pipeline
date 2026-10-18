@@ -135,4 +135,3 @@ def test_process_chapter_docling_only_flag(tmp_path: Path):
         mock_convert.assert_called_once()
         mock_extract.assert_not_called()
         mock_patch.assert_called_once_with(final_md)
-

@@ -92,4 +92,3 @@ def test_pymupdf_extract_pdf(tmp_path: Path):
     assert res == out
     assert out.exists()
     assert "Sample Rules Heading" in out.read_text(encoding="utf-8")
-

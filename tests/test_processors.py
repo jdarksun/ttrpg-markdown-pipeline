@@ -123,4 +123,3 @@ def test_find_final_outputs(tmp_path: Path):
     # Should safely exclude intermediate files
     assert "04-Paths - DOCLING.md" not in final_names
     assert "04-Paths - GEMINI.md" not in final_names
-
