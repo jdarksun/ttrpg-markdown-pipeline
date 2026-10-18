@@ -54,6 +54,9 @@ UNIVERSAL_INLINE_FIXES = {
     r"gain that can be spent only to Strike": "gain [Free Action] that can be spent only to Strike",
     r"use their Rousing Presence as \.": "use their Rousing Presence as [Free Action].",
     r"use your Field Medicine as \.": "use your Field Medicine as [Free Action].",
+    # Chapter 3 Specifics (Skills as Actions)
+    r"ask you to use to do so": "ask you to use [1 Action] to do so",
+    r"don't need to use \.": "don't need to use [1 Action].",
     # Chapter 4 Specifics (Agent & Scholar inline gaps)
     r"gain for cognitive tests": "gain [2 Actions] for cognitive tests",
     r"gain for physical tests": "gain [2 Actions] for physical tests",

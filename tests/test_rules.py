@@ -23,6 +23,8 @@ def test_patch_cosmere_rules():
         "Implant Spike (3) and Remove Spike (▶)\n"
         "can spend to appeal to their own sense of duty\n"
         "can spend to lessen your grip on the handle\n"
+        "ask you to use to do so (via the Use a Skill action in chapter 10).\n"
+        "If you're making a test as part of another action, you don't need to use .\n"
     )
 
     patched = patch_cosmere_rules(sample)
@@ -47,6 +49,8 @@ def test_patch_cosmere_rules():
     assert "Implant Spike [3 Actions] and Remove Spike [1 Action]" in patched
     assert "can spend [Opportunity] to appeal to their own sense of duty" in patched
     assert "can spend [Complication] to lessen your grip on the handle" in patched
+    assert "ask you to use [1 Action] to do so (via the Use a Skill action in chapter 10)." in patched
+    assert "If you're making a test as part of another action, you don't need to use [1 Action]." in patched
 
 
 def test_mechanics_keyword_matching():
