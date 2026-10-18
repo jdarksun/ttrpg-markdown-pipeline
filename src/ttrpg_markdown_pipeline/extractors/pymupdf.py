@@ -16,7 +16,7 @@ def extract_pdf(pdf_path: Path, output_path: Path) -> Path:
     except (ImportError, OSError):
         # Graceful fallback if Application Control / AppLocker blocks third-party OCR DLLs (e.g. shapely)
         doc = pymupdf.open(pdf_path)
-        pages_text = [page.get_text("text") for page in doc]
+        pages_text = [doc[i].get_text("text") for i in range(len(doc))]
         doc.close()
         md_text = "\n\n".join(pages_text)
     output_path.write_text(md_text, encoding="utf-8")

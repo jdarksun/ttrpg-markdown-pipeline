@@ -1,5 +1,6 @@
 import argparse
 import re
+import sys
 import tempfile
 import time
 from datetime import datetime
@@ -226,7 +227,7 @@ def extract_pdf(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Extract PDF rules via Gemini Vision with automated model failover.")
-    parser.add_argument("pdf_path", type=clean_path, help="Path to input PDF")
+    parser.add_argument("input_path", type=clean_path, help="Path to input PDF file or directory containing PDFs")
     parser.add_argument(
         "-o",
         "--output",
@@ -255,12 +256,41 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if not args.pdf_path.is_file():
-        raise FileNotFoundError(f"PDF not found: {args.pdf_path}")
+    if not args.input_path.exists():
+        sys.exit(f"Error: Path does not exist: {args.input_path}")
+
+    if args.input_path.is_file():
+        if args.input_path.suffix.lower() != ".pdf":
+            sys.exit(f"Error: {args.input_path} is not a PDF file.")
+        pdf_files = [args.input_path]
+        default_dir = args.input_path.parent
+    else:
+        pdf_files = sorted(args.input_path.glob("*.pdf"))
+        if not pdf_files:
+            sys.exit(f"Error: No PDF files found in {args.input_path}")
+        default_dir = args.input_path / "md"
+        if args.output is not None and args.output.suffix.lower() == ".md":
+            sys.exit("Error: --output must be a directory when converting a folder of PDFs.")
+
+    targets = [(pdf, resolve_md_output(args.output, default_dir, pdf.stem, GEMINI_TAG)) for pdf in pdf_files]
+    print(f"Found {len(pdf_files)} PDF(s) to process. Output target: {targets[0][1].parent}\n")
 
     model_pool = [args.model] if args.model else None
-    output_path = resolve_md_output(args.output, args.pdf_path.parent, args.pdf_path.stem, GEMINI_TAG)
-    extract_pdf(args.pdf_path, output_path, chunk_size=args.chunk_size, model_pool=model_pool, strategy=args.strategy)
+
+    for idx, (pdf_path, out_file) in enumerate(targets, 1):
+        print(f"[{idx}/{len(targets)}] Extracting via Gemini: {pdf_path.name}...")
+        try:
+            extract_pdf(
+                pdf_path,
+                out_file,
+                chunk_size=args.chunk_size,
+                model_pool=model_pool,
+                strategy=args.strategy,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"       -> Failed to process {pdf_path.name}: {e}", file=sys.stderr)
+
+    print("\nGemini processing complete.")
 
 
 if __name__ == "__main__":

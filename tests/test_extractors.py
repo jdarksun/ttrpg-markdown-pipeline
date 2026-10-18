@@ -178,3 +178,39 @@ def test_gemini_extract_pdf_creates_cache_and_output(tmp_path: Path):
     assert cache_dir.exists()
     assert (cache_dir / "chunk_001_001.md").exists()
     assert (cache_dir / "chunk_002_002.md").exists()
+
+
+def test_gemini_main_batch_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from ttrpg_markdown_pipeline.extractors.gemini import main as gemini_main
+
+    pdf_dir = tmp_path / "chapters"
+    pdf_dir.mkdir()
+    pdf1 = pdf_dir / "01-Chapter.pdf"
+    pdf2 = pdf_dir / "02-Chapter.pdf"
+
+    for p in (pdf1, pdf2):
+        doc = pymupdf.open()
+        doc.new_page().insert_text((72, 72), "Content")
+        doc.save(p)
+        doc.close()
+
+    out_dir = tmp_path / "output"
+
+    called_paths = []
+
+    def mock_extract(pdf_path, output_path, **kwargs):
+        called_paths.append((pdf_path, output_path))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("Extracted", encoding="utf-8")
+        return output_path
+
+    monkeypatch.setattr("ttrpg_markdown_pipeline.extractors.gemini.extract_pdf", mock_extract)
+    monkeypatch.setattr("sys.argv", ["ttrpg-gemini", str(pdf_dir), "-o", str(out_dir)])
+
+    gemini_main()
+
+    assert len(called_paths) == 2
+    assert called_paths[0][0] == pdf1
+    assert called_paths[0][1] == out_dir / "01-Chapter - GEMINI.md"
+    assert called_paths[1][0] == pdf2
+    assert called_paths[1][1] == out_dir / "02-Chapter - GEMINI.md"

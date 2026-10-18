@@ -87,7 +87,11 @@ ttrpg-docling "PDF_Chapters/" -o "Markdown/" --force
 ### 2. `ttrpg-gemini`
 Vision-based rules and icon extraction with automatic model failover and per-chapter chunk caching:
 ```bash
+# Extract a single PDF
 ttrpg-gemini "04-Heroic_Paths.pdf" -o "Markdown/" --chunk-size 8
+
+# Batch extract a folder of PDFs
+ttrpg-gemini "PDF_Chapters/" -o "Markdown/"
 ```
 *Note: If an API quota error occurs midway, progress is saved in `.cache_<output_stem>/`. Re-running the command resumes where it stopped.*
 
