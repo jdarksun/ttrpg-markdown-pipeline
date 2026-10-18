@@ -82,6 +82,21 @@ Burn text 2.
 Invested Prerequisite: Mistborn Snap key talent Activation:
 Invested description without heading hashes.
 
+## Using Metallic Arts
+Chapter 6 overview text.
+
+## Burn Cadmium Activation: Duration: 1 round
+You burn cadmium to slow time.
+
+Accelerated Reflexes
+Prerequisite: Feruchemy 3+; Sparked Aid talent Activation: V
+You accelerate reflexes.
+
+## Pewterarm Weaponcraft
+Prerequisite: Heavy Weaponry 1+ or Light Weaponry 1+; Pewter Feruchemy power
+Activation:
+Weaponcraft description.
+
 <!-- image -->
 
 ## Steady Aim
@@ -112,6 +127,22 @@ Summary description of steady aim in flowchart without activation.
 ### Invested
 - **Prerequisites:** Mistborn Snap key talent
 - **Activation:** [Passive]
+
+### Burn Cadmium
+- **Prerequisites:** None
+- **Activation:** [1 Action]
+
+### Accelerated Reflexes
+- **Prerequisites:** Feruchemy 3+; Sparked Aid talent
+- **Activation:** [1 Action]
+
+### Pewterarm Weaponcraft
+- **Prerequisites:** Heavy Weaponry 1+ or Light Weaponry 1+; Pewter Allomancy power
+- **Activation:** [Special Activation]
+
+### Pewterarm Weaponcraft
+- **Prerequisites:** Heavy Weaponry 1+ or Light Weaponry 1+; Pewter Feruchemy power
+- **Activation:** [Special Activation]
 """
 
     docling_file.write_text(docling_text, encoding="utf-8")
@@ -137,6 +168,8 @@ Summary description of steady aim in flowchart without activation.
     # Non-talent header guardrail verification:
     assert "## Mistborn History" in merged_text
     assert "### Mistborn History" not in merged_text
+    assert "## Using Metallic Arts" in merged_text
+    assert "### Using Metallic Arts" not in merged_text
 
     # Phantom dash heading prevention verification:
     assert "### Alloyed Resonance" in merged_text
@@ -150,6 +183,15 @@ Summary description of steady aim in flowchart without activation.
     assert "### Invested" in merged_text
     assert "- **Prerequisites:** Mistborn Snap key talent" in merged_text
     assert "- **Activation:** [Passive]" in merged_text
+
+    # Squashed activation line verification:
+    assert "### Burn Cadmium" in merged_text
+    assert "- **Activation:** [1 Action]" in merged_text
+    assert "### Accelerated Reflexes" in merged_text
+    assert "- **Prerequisites:** Feruchemy 3+; Sparked Aid talent" in merged_text
+
+    # Prerequisite word overlap tiebreaker verification:
+    assert "- **Prerequisites:** Heavy Weaponry 1+ or Light Weaponry 1+; Pewter Feruchemy power" in merged_text
 
     # Flowchart protection verification (already processed talents are skipped in fallback):
     assert "## Steady Aim\nSummary description of steady aim in flowchart without activation." in merged_text

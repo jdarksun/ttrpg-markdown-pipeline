@@ -1,16 +1,24 @@
 import argparse
 from pathlib import Path
 
+import pymupdf
 import pymupdf4llm
 
 from ttrpg_markdown_pipeline.common import clean_path
 
 
 def extract_pdf(pdf_path: Path, output_path: Path) -> Path:
-    """Quick layout-aware extraction of PDF text to Markdown via PyMuPDF4LLM."""
+    """Quick layout-aware extraction of PDF text to Markdown via PyMuPDF4LLM with PyMuPDF fallback."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Extracting {pdf_path.name} -> {output_path.name}...")
-    md_text = pymupdf4llm.to_markdown(str(pdf_path))
+    try:
+        md_text = pymupdf4llm.to_markdown(str(pdf_path))
+    except (ImportError, OSError):
+        # Graceful fallback if Application Control / AppLocker blocks third-party OCR DLLs (e.g. shapely)
+        doc = pymupdf.open(pdf_path)
+        pages_text = [page.get_text("text") for page in doc]
+        doc.close()
+        md_text = "\n\n".join(pages_text)
     output_path.write_text(md_text, encoding="utf-8")
     print("Done!")
     return output_path

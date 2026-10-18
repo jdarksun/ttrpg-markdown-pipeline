@@ -43,6 +43,81 @@ NON_TALENT_HEADERS: set[str] = {
     "exploring resonances",
     "compounders",
     "manifestations of savantism",
+    # Chapter 6 Overview & Rules Sections
+    "using metallic arts",
+    "metallic art powers",
+    "what's known versus what's possible",
+    "nascent powers",
+    "nascent allomantic powers",
+    "nascent power examples",
+    "nascent feruchemical powers",
+    "power scaling",
+    "metallic art limit",
+    "metallic art die",
+    "metallic art range",
+    "metallic art scaling",
+    "metallic art durations",
+    "maintaining powers",
+    "ending a power",
+    "durations of store actions",
+    "duration outside combat",
+    "using metallic arts creatively",
+    "allomantically inert materials",
+    "aluminum",
+    "anatomy of a power",
+    "metals of scadrial",
+    "metals in allomancy",
+    "metals in feruchemy",
+    "common and rare metals",
+    "god metals",
+    "lost and discovered metals",
+    "both eras",
+    "all of era 1",
+    "end of era 1",
+    "era 2",
+    "using atium allomancy",
+    "unique properties",
+    "hemalurgy",
+    "a forbidden art",
+    # Chapter 6 Metallic Art Power & Tree Headers
+    "atium allomancy",
+    "bendalloy allomancy",
+    "brass allomancy",
+    "bronze allomancy",
+    "cadmium allomancy",
+    "chromium allomancy",
+    "copper allomancy",
+    "duralumin allomancy",
+    "electrum allomancy",
+    "gold allomancy",
+    "iron allomancy",
+    "nicrosil allomancy",
+    "pewter allomancy",
+    "steel allomancy",
+    "tin allomancy",
+    "zinc allomancy",
+    "aluminum feruchemy",
+    "atium feruchemy",
+    "bendalloy feruchemy",
+    "brass feruchemy",
+    "bronze feruchemy",
+    "cadmium feruchemy",
+    "chromium feruchemy",
+    "copper feruchemy",
+    "duralumin feruchemy",
+    "electrum feruchemy",
+    "gold feruchemy",
+    "iron feruchemy",
+    "nicrosil feruchemy",
+    "pewter feruchemy",
+    "steel feruchemy",
+    "tin feruchemy",
+    "zinc feruchemy",
+    "pulsers and allomantic grenades",
+    "altered emotional states",
+    "fortune, not luck",
+    "brass feruchemy and the southern peoples",
+    "true atium",
     # History headers
     "mistborn history",
     "feruchemist history",
@@ -95,22 +170,16 @@ class TalentMetadata(dict[str, dict[str, str]]):
         if not entries:
             return None
 
-        # If multiple entries and docling_prereq provided, match prerequisite keywords
+        # If multiple entries and docling_prereq provided, find candidate with highest word overlap
         if len(entries) > 1 and docling_prereq:
             clean_dp = " ".join(docling_prereq.lower().split())
-            for ent in entries:
-                clean_ep = ent["prereq"].lower()
-                if (
-                    clean_dp in clean_ep
-                    or clean_ep in clean_dp
-                    or clean_ep[:10] in clean_dp
-                    or any(
-                        w in clean_dp
-                        for w in clean_ep.split()
-                        if len(w) > 4 and w not in ("talent", "prerequisite", "prerequisites")
-                    )
-                ):
-                    return ent
+            docling_words = set(clean_dp.split())
+            best_candidate = max(
+                entries,
+                key=lambda c: len(set(c["prereq"].lower().split()) & docling_words),
+            )
+            if len(set(best_candidate["prereq"].lower().split()) & docling_words) > 0:
+                return best_candidate
 
         # Sequential cursor consumption
         idx = self._consumed.get(lookup_name, 0)
@@ -179,7 +248,7 @@ def merge_chapter(
     header_regex = re.compile(
         r"^[ \t]*(?:##\s*|###\s*)?([A-Za-z0-9 ’'!\-()]+?)\s*\n*"
         r"(?:(?:##\s*|###\s*|[-*]\s*)?Prerequisites?:\s*((?:(?!^[ \t]*##|Activation:).)*?))?"
-        r"(?:##\s*|###\s*|[-*]\s*)?Activation:\s*$",
+        r"(?:##\s*|###\s*|[-*]\s*)?Activation:[^\n]*$",
         re.MULTILINE | re.IGNORECASE | re.DOTALL,
     )
 
