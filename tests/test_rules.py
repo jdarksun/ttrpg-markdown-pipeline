@@ -15,6 +15,9 @@ def test_patch_cosmere_rules():
         "## Cadmium Allomancy Era 2\n"
         "## Tier 2\n"
         "Activation:\n"
+        "use the Interact action as ▷ to draw this weapon.\n"
+        "The GM can spend to cause your armor to crack.\n"
+        "use 2 to attach and light a fuse.\n"
     )
 
     patched = patch_cosmere_rules(sample)
@@ -31,6 +34,9 @@ def test_patch_cosmere_rules():
     assert "## Cadmium Allomancy Era 2" in patched
     assert "## Tier 2" in patched
     assert "Activation: [Passive / Varies]" in patched
+    assert "use the Interact action as [Free Action] to draw this weapon." in patched
+    assert "The GM can spend [Complication] to cause your armor to crack." in patched
+    assert "use [2 Actions] to attach and light a fuse." in patched
 
 
 def test_mechanics_keyword_matching():

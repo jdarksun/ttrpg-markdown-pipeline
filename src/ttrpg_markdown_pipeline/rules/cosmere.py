@@ -71,6 +71,17 @@ UNIVERSAL_INLINE_FIXES = {
         "Spend 2 focus to gain [1 Action], which you can only use"
     ),
     r"gain for tapping your": "gain [1 Action] for tapping your",
+    # Chapter 7 Specifics (Items, Equipment & Traits)
+    r"action as ▷ to draw": "action as [Free Action] to draw",
+    r"can spend to cause it to break": "can spend [Complication] to cause it to break",
+    r"GM can spend to cause your armor": "GM can spend [Complication] to cause your armor",
+    r"can spend to cause the target": "can spend [Opportunity] to cause the target",
+    r"spend from an attack": "spend [Complication] from an attack",
+    r"use 2 to attach and light": "use [2 Actions] to attach and light",
+    r"can use to make an Athletics test": "can use [1 Action] to make an Athletics test",
+    r"can use to throw this pouch": "can use [1 Action] to throw this pouch",
+    r"used as to light abundant fuel": "used as [1 Action] to light abundant fuel",
+    r"same duration by using \.": "same duration by using [1 Action].",
 }
 
 
@@ -107,5 +118,9 @@ def patch_cosmere_rules(text: str) -> str:
 
     # 5. Fix standalone blank 'Activation:' lines
     text = re.sub(r"^Activation:\s*$", "Activation: [Passive / Varies]", text, flags=re.MULTILINE)
+
+    # 6. Apply universal inline icon and phrase repairs
+    for raw_regex, fix in UNIVERSAL_INLINE_FIXES.items():
+        text = re.sub(raw_regex, fix, text)
 
     return text
