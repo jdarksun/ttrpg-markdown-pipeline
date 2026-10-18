@@ -78,6 +78,14 @@ Burn text 1.
 Prerequisite: Mistborn Snap
 Activation:
 Burn text 2.
+
+Invested Prerequisite: Mistborn Snap key talent Activation:
+Invested description without heading hashes.
+
+<!-- image -->
+
+## Steady Aim
+Summary description of steady aim in flowchart without activation.
 """
 
     gemini_text = """
@@ -100,6 +108,10 @@ Burn text 2.
 ### Instinctual Burn
 - **Prerequisites:** Allomancy 3+; Mistborn Snap key talent
 - **Activation:** [Special Activation]
+
+### Invested
+- **Prerequisites:** Mistborn Snap key talent
+- **Activation:** [Passive]
 """
 
     docling_file.write_text(docling_text, encoding="utf-8")
@@ -133,6 +145,14 @@ Burn text 2.
     # Occurrence-aware sequential resolution verification:
     assert "- **Prerequisites:** Allomancy 3+; Misting Snap key talent" in merged_text
     assert "- **Prerequisites:** Allomancy 3+; Mistborn Snap key talent" in merged_text
+
+    # Un-headered mangled line verification:
+    assert "### Invested" in merged_text
+    assert "- **Prerequisites:** Mistborn Snap key talent" in merged_text
+    assert "- **Activation:** [Passive]" in merged_text
+
+    # Flowchart protection verification (already processed talents are skipped in fallback):
+    assert "## Steady Aim\nSummary description of steady aim in flowchart without activation." in merged_text
 
 
 def test_patch_file(tmp_path: Path):

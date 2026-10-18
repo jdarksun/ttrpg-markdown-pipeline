@@ -100,7 +100,16 @@ class TalentMetadata(dict[str, dict[str, str]]):
             clean_dp = " ".join(docling_prereq.lower().split())
             for ent in entries:
                 clean_ep = ent["prereq"].lower()
-                if clean_dp in clean_ep or clean_ep in clean_dp:
+                if (
+                    clean_dp in clean_ep
+                    or clean_ep in clean_dp
+                    or clean_ep[:10] in clean_dp
+                    or any(
+                        w in clean_dp
+                        for w in clean_ep.split()
+                        if len(w) > 4 and w not in ("talent", "prerequisite", "prerequisites")
+                    )
+                ):
                     return ent
 
         # Sequential cursor consumption
@@ -168,10 +177,10 @@ def merge_chapter(
 
     # Primary Pass: Matches single-line compressed Docling headers AND multiline split headers
     header_regex = re.compile(
-        r"^(?:##\s*|###\s*)?([A-Za-z0-9 ’'!\-()]+?)\s*\n*"
-        r"(?:(?:##\s*|###\s*|[-*]\s*)?Prerequisites?:\s*((?:(?!Activation:|Prerequisites?:)[^\n])+(?:\n[^\n#]+)?)\s*\n*)?"
+        r"^[ \t]*(?:##\s*|###\s*)?([A-Za-z0-9 ’'!\-()]+?)\s*\n*"
+        r"(?:(?:##\s*|###\s*|[-*]\s*)?Prerequisites?:\s*((?:(?!^[ \t]*##|Activation:).)*?))?"
         r"(?:##\s*|###\s*|[-*]\s*)?Activation:\s*$",
-        re.MULTILINE | re.IGNORECASE,
+        re.MULTILINE | re.IGNORECASE | re.DOTALL,
     )
 
     matched_talents: set[str] = set()
@@ -220,7 +229,7 @@ def merge_chapter(
         clean_v = re.sub(r"\s*\([^)]*\)", "", clean_v).strip().lower()
         if clean_v in NON_TALENT_HEADERS or clean_v in matched_talents:
             continue
-        raw_escaped = re.escape(v["raw_name"])
+        raw_escaped = re.escape(v["raw_name"]).replace(r"\'", "['’]").replace("’", "['’]")
         fallback_regex = re.compile(
             rf"^##\s+({raw_escaped}(?:\s*\([^)]*\))?)\s*\n+(?!- \*\*Prerequisites)",
             re.MULTILINE | re.IGNORECASE,
