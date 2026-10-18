@@ -20,6 +20,9 @@ def test_patch_cosmere_rules():
         "use 2 to attach and light a fuse.\n"
         "| Calibration | expend the | - |\n"
         "| Suppressor | ammunition from that chamber. Only sensed within |\n"
+        "Implant Spike (3) and Remove Spike (▶)\n"
+        "can spend to appeal to their own sense of duty\n"
+        "can spend to lessen your grip on the handle\n"
     )
 
     patched = patch_cosmere_rules(sample)
@@ -41,6 +44,9 @@ def test_patch_cosmere_rules():
     assert "use [2 Actions] to attach and light a fuse." in patched
     assert "| Calibration | expend the ammunition from that chamber. | - |" in patched
     assert "| Suppressor | Only sensed within |" in patched
+    assert "Implant Spike [3 Actions] and Remove Spike [1 Action]" in patched
+    assert "can spend [Opportunity] to appeal to their own sense of duty" in patched
+    assert "can spend [Complication] to lessen your grip on the handle" in patched
 
 
 def test_mechanics_keyword_matching():

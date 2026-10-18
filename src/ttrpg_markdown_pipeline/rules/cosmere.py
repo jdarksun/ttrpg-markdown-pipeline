@@ -85,6 +85,11 @@ UNIVERSAL_INLINE_FIXES = {
     # Chapter 7 Table Spill Fixes
     r"expend the\s*\|\s*-\s*\|": "expend the ammunition from that chamber. | - |",
     r"\|\s*Suppressor\s*\|\s*ammunition from that chamber\.\s*": "| Suppressor | ",
+    # Chapter 8 Specifics (Organizations & Hemalurgy)
+    r"Implant Spike \(3\)": "Implant Spike [3 Actions]",
+    r"Remove Spike \(▶\)": "Remove Spike [1 Action]",
+    r"can spend to appeal to their own sense": "can spend [Opportunity] to appeal to their own sense",
+    r"can spend to lessen your grip": "can spend [Complication] to lessen your grip",
 }
 
 
