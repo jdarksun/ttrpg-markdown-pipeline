@@ -160,3 +160,127 @@ class OKFAdversary(OKFConcept):
     type: Literal["adversary"] = "adversary"
     tier: int | str | None = Field(default=None, description="Adversary tier or challenge rating")
     role: str | None = Field(default=None, description="Adversary role (e.g. Minion, Leader, Solo)")
+
+
+class OKFLoreEntry(OKFConcept):
+    """Represents narrative worldbuilding, factions, historical lore, or locations."""
+
+    type: Literal["lore", "faction", "location"] = "lore"
+    key_themes: list[str] = Field(default_factory=list, description="Core narrative themes, tones, or motifs")
+    adventure_hooks: list[str] = Field(default_factory=list, description="Plot hooks, rumors, or encounter seeds")
+
+    def to_markdown(self) -> str:
+        """Serializes lore into YAML frontmatter followed by lore description and adventure hooks."""
+        data = self.model_dump(exclude={"body_text", "example_text"})
+        frontmatter = yaml.safe_dump(
+            data,
+            sort_keys=False,
+            allow_unicode=True,
+            default_flow_style=False,
+        ).strip()
+        body = self.body_text.strip()
+        example = self.example_text.strip() if self.example_text else None
+
+        parts = [f"---\n{frontmatter}\n---"]
+        if body:
+            if not body.startswith("### Lore & Worldbuilding") and not body.startswith("### Description"):
+                parts.append(f"\n### Lore & Worldbuilding\n\n{body}")
+            else:
+                parts.append(f"\n{body}")
+
+        if self.adventure_hooks:
+            hooks_md = "\n".join(f"- {h}" for h in self.adventure_hooks)
+            parts.append(f"\n### Adventure Hooks\n\n{hooks_md}")
+
+        if example:
+            parts.append(f"\n### Example Play\n\n{example}\n")
+        elif body or self.adventure_hooks:
+            parts[-1] = parts[-1] + "\n"
+        else:
+            parts.append("\n")
+
+        return "\n".join(parts)
+
+
+class OKFAdventureNode(OKFConcept):
+    """Represents a procedural adventure scene, encounter, or decision node."""
+
+    type: Literal["adventure_node"] = "adventure_node"
+    module_name: str | None = Field(default=None, description="Name of the parent adventure module")
+    node_id: str = Field(..., description="Scene or decision node identifier, e.g. 'A1', 'B4', 'Part 1'")
+    read_aloud: str | None = Field(default=None, description="Boxed or player-facing read-aloud text")
+    skill_checks: list[dict[str, Any]] = Field(default_factory=list, description="Skill tests, DCs, and outcomes")
+    state_mutations: list[str] = Field(
+        default_factory=list,
+        description="Tracking sheet updates or condition changes",
+    )
+    choices: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Branching player choices and target node IDs",
+    )
+    journal_prompts: list[str] = Field(
+        default_factory=list,
+        description="Solo journaling or roleplay reflection prompts",
+    )
+
+    def to_markdown(self) -> str:
+        """Serializes the adventure node into YAML frontmatter and structured markdown subsections."""
+        data = self.model_dump(exclude={"body_text", "example_text", "read_aloud"})
+        frontmatter = yaml.safe_dump(
+            data,
+            sort_keys=False,
+            allow_unicode=True,
+            default_flow_style=False,
+        ).strip()
+
+        parts = [f"---\n{frontmatter}\n---"]
+
+        if self.read_aloud and self.read_aloud.strip():
+            quoted = "\n".join(f"> {line}" for line in self.read_aloud.strip().splitlines())
+            parts.append(f"\n### Read-Aloud\n\n{quoted}")
+
+        body = self.body_text.strip()
+        if body:
+            if not body.startswith("### Scene & Mechanics") and not body.startswith("### Mechanics"):
+                parts.append(f"\n### Scene & Mechanics\n\n{body}")
+            else:
+                parts.append(f"\n{body}")
+
+        if self.skill_checks:
+            checks_lines = []
+            for check in self.skill_checks:
+                skill = check.get("skill", "Check")
+                dc = check.get("dc")
+                dc_str = f" (DC {dc})" if dc is not None else ""
+                success = check.get("success")
+                failure = check.get("failure")
+                outcome = ""
+                if success or failure:
+                    outcome = f": Success -> {success or 'Proceed'}; Failure -> {failure or 'Consequence'}"
+                checks_lines.append(f"- **{skill}**{dc_str}{outcome}")
+            parts.append("\n### Skill Checks\n\n" + "\n".join(checks_lines))
+
+        if self.choices:
+            choice_lines = []
+            for choice in self.choices:
+                opt = choice.get("option", "Choice")
+                target = choice.get("target_node")
+                cond = choice.get("condition")
+                target_str = f" -> Go to **{target}**" if target else ""
+                cond_str = f" *({cond})*" if cond else ""
+                choice_lines.append(f"- {opt}{cond_str}{target_str}")
+            parts.append("\n### Choices & Branches\n\n" + "\n".join(choice_lines))
+
+        if self.journal_prompts:
+            journal_lines = [f"- *{p}*" for p in self.journal_prompts]
+            parts.append("\n### Journal Prompts\n\n" + "\n".join(journal_lines))
+
+        example = self.example_text.strip() if self.example_text else None
+        if example:
+            parts.append(f"\n### Example Play\n\n{example}\n")
+        elif len(parts) > 1:
+            parts[-1] = parts[-1] + "\n"
+        else:
+            parts.append("\n")
+
+        return "\n".join(parts)

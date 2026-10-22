@@ -3,7 +3,9 @@
 import yaml
 
 from ttrpg_markdown_pipeline.models import (
+    OKFAdventureNode,
     OKFConcept,
+    OKFLoreEntry,
     OKFRule,
     OKFTalent,
     OKFWeapon,
@@ -134,3 +136,69 @@ def test_okf_rule_action_cost():
     )
     assert rule.type == "rule"
     assert rule.action_cost == "[1 Action]"
+
+
+def test_okf_lore_entry():
+    lore = OKFLoreEntry(
+        type="faction",
+        sourcebook="Stormlight World Guide",
+        name="Ghostbloods",
+        category="Secret Societies",
+        key_themes=["Cosmere conspiracy", "Survival at any cost"],
+        adventure_hooks=[
+            "A contact disappears leaving behind a silver coin.",
+            "A warehouse contains unrefined gemstones from another world.",
+        ],
+        body_text="An enigmatic organization originating from Scadrial seeking Investiture across the Cosmere.",
+    )
+
+    md = lore.to_markdown()
+    assert "type: faction" in md
+    assert "Ghostbloods" in md
+    assert "key_themes:" in md
+    assert "Cosmere conspiracy" in md
+    assert "### Lore & Worldbuilding" in md
+    assert "An enigmatic organization originating from Scadrial" in md
+    assert "### Adventure Hooks" in md
+    assert "- A contact disappears leaving behind a silver coin." in md
+
+
+def test_okf_adventure_node():
+    node = OKFAdventureNode(
+        sourcebook="Stormlight RPG - The First Step",
+        module_name="The First Step: Solo Edition",
+        node_id="A1",
+        name="Alethi Ambush Opening",
+        category="Part 1",
+        read_aloud="The sound of thunder shakes the canyon as arrows rain down from above.",
+        body_text="Parshendi skirmishers ambush the caravan flanks. Crawlers must react immediately.",
+        skill_checks=[
+            {
+                "skill": "Athletics",
+                "dc": 14,
+                "success": "Reach cover unharmed",
+                "failure": "Take 4 keen damage",
+            }
+        ],
+        state_mutations=["Resources -1", "Condition: Alert"],
+        choices=[
+            {"option": "Charge the archers", "target_node": "A2"},
+            {"option": "Protect the wagon", "target_node": "A3", "condition": "Requires shield"},
+        ],
+        journal_prompts=["How does your character react to the sudden violence of the ambush?"],
+    )
+
+    md = node.to_markdown()
+    assert "type: adventure_node" in md
+    assert "node_id: A1" in md
+    assert "### Read-Aloud" in md
+    assert "> The sound of thunder shakes the canyon" in md
+    assert "### Scene & Mechanics" in md
+    assert "Parshendi skirmishers ambush the caravan flanks." in md
+    assert "### Skill Checks" in md
+    assert "- **Athletics** (DC 14): Success -> Reach cover unharmed; Failure -> Take 4 keen damage" in md
+    assert "### Choices & Branches" in md
+    assert "- Charge the archers -> Go to **A2**" in md
+    assert "- Protect the wagon *(Requires shield)* -> Go to **A3**" in md
+    assert "### Journal Prompts" in md
+    assert "- *How does your character react to the sudden violence of the ambush?*" in md
