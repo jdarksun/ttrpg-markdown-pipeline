@@ -132,6 +132,8 @@ def test_clean_extraction_artifacts():
     assert "Unauthorized distribution" not in cleaned
     assert "●" not in cleaned
     assert "•" not in cleaned
+    assert "48" not in cleaned
+    assert "52" not in cleaned
     assert "\nM\n" not in cleaned
     assert "\n\nV\n\n" not in cleaned
     assert "Actual rules content remains intact." in cleaned

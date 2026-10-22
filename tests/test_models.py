@@ -39,6 +39,7 @@ def test_okf_concept_to_markdown():
     assert "sourcebook: Mistborn World Guide" in md
     assert "name: Allomancy Overview" in md
     assert "category: Metallic Arts" in md
+    assert "### Mechanics\n\nAllomancy is the art of burning metals." in md
     assert md.endswith("Allomancy is the art of burning metals.\n")
 
     # Frontmatter can be parsed as valid yaml

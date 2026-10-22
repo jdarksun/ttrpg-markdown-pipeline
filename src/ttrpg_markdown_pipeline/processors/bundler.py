@@ -47,7 +47,10 @@ def format_concept_for_bundle(atomic_markdown: str) -> str:
 
             blocks = [f"## {concept_name}", f"```yaml\n{yaml_raw}\n```"]
             if body_raw:
-                blocks.append(body_raw)
+                if not body_raw.startswith("### Mechanics"):
+                    blocks.append(f"### Mechanics\n\n{body_raw}")
+                else:
+                    blocks.append(body_raw)
 
             return "\n\n".join(blocks)
 

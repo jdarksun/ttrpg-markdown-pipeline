@@ -103,6 +103,9 @@ def clean_extraction_artifacts(text: str) -> str:
     # Strip stray single-letter OCR noise lines (e.g. 'M', 'V')
     cleaned = re.sub(r"^[ \t]*[MV][ \t]*$\n?", "", cleaned, flags=re.MULTILINE)
 
+    # Strip standalone page number lines (e.g. '44', '28')
+    cleaned = re.sub(r"^[ \t]*\d{1,4}[ \t]*$\n?", "", cleaned, flags=re.MULTILINE)
+
     # Collapse 3+ consecutive newlines
     cleaned = re.sub(r"(\r?\n\s*){3,}", "\n\n", cleaned)
 

@@ -73,13 +73,16 @@ class OKFConcept(BaseModel):
         example = self.example_text.strip() if self.example_text else None
 
         parts = [f"---\n{frontmatter}\n---"]
-        if body and example:
-            parts.append(f"\n### Mechanics\n\n{body}")
+        if body:
+            if not body.startswith("### Mechanics"):
+                parts.append(f"\n### Mechanics\n\n{body}")
+            else:
+                parts.append(f"\n{body}")
+
+        if example:
             parts.append(f"\n### Example Play\n\n{example}\n")
         elif body:
-            parts.append(f"\n{body}\n")
-        elif example:
-            parts.append(f"\n### Example Play\n\n{example}\n")
+            parts[-1] = parts[-1] + "\n"
         else:
             parts.append("\n")
 
