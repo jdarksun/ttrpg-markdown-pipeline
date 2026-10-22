@@ -9,6 +9,8 @@ MECHANICS_KEYWORDS = [
     "combat",  # Combat
     "item",  # Items & Equipment
     "adversar",  # Adversaries / Bestiary
+    "equipment",  # Equipment & Gear
+    "expertise",  # Cultural & Utility Expertises
 ]
 
 DEFAULT_PROMPT = """
