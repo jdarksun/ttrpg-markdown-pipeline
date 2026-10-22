@@ -7,6 +7,7 @@ import yaml
 
 from ttrpg_markdown_pipeline.processors.shredder import (
     clean_extraction_artifacts,
+    consolidate_concepts,
     parse_gemini_json_payload,
     sanitize_slug,
     shred_chapter,
@@ -171,3 +172,116 @@ def test_split_mechanics_and_examples_no_example():
     mech, example = split_mechanics_and_examples(text)
     assert mech == text
     assert example is None
+
+
+def test_consolidate_concepts():
+    chunk_data = [
+        {
+            "name": "Attack",
+            "type": "rule",
+            "sourcebook": "DCC RPG",
+            "category": "Combat",
+            "action_cost": "1 Action",
+            "trigger": None,
+            "body_text": "Brief table summary: Make an attack.",
+        },
+        {
+            "name": "Attack",
+            "type": "rule",
+            "sourcebook": "DCC RPG Starter Set",
+            "category": "Combat Actions",
+            "action_cost": None,
+            "trigger": "When in melee or ranged range",
+            "body_text": "When you take an Attack action, roll 1d20 + modifier against Armor Class.",
+            "example_text": "Joe: I attack the goblin!\nGM: Roll to hit.",
+        },
+        {
+            "name": "Longsword",
+            "type": "weapon",
+            "traits": ["Versatile"],
+            "damage": "1d8 physical",
+        },
+        {
+            "name": "Longsword",
+            "type": "weapon",
+            "traits": ["Slashing", "Versatile"],
+            "cost": "15 gp",
+        },
+    ]
+
+    consolidated = consolidate_concepts(chunk_data)
+    assert len(consolidated) == 2
+
+    # Check Attack consolidation
+    attack = consolidated[0]
+    assert attack["name"] == "Attack"
+    assert attack["action_cost"] == "1 Action"
+    assert attack["trigger"] == "When in melee or ranged range"
+    assert attack["body_text"] == "When you take an Attack action, roll 1d20 + modifier against Armor Class."
+    assert "Joe: I attack the goblin!" in attack["example_text"]
+
+    # Check Longsword consolidation
+    sword = consolidated[1]
+    assert sword["name"] == "Longsword"
+    assert sword["damage"] == "1d8 physical"
+    assert sword["cost"] == "15 gp"
+    assert set(sword["traits"]) == {"Versatile", "Slashing"}
+
+
+def test_shred_chapter_sourcebook_override_and_dedup(tmp_path: Path):
+    docling_file = tmp_path / "05-Chapter - DOCLING.md"
+    docling_file.write_text(
+        "## Attack\n\nWhen you attack, roll 1d20.\n\n## Move\n\nYou move your speed.\n",
+        encoding="utf-8",
+    )
+
+    gemini_file = tmp_path / "05-Chapter - GEMINI.md"
+    gemini_data = [
+        {
+            "schema_version": "1.0.0",
+            "sourcebook": "DCC Random Hallucination",
+            "type": "rule",
+            "name": "Attack",
+            "action_cost": "1 Action",
+            "body_text": "When you attack, roll 1d20.",
+        },
+        {
+            "schema_version": "1.0.0",
+            "sourcebook": "DCC Another Variant",
+            "type": "rule",
+            "name": "Attack",
+            "action_cost": "1 Action",
+            "body_text": "When you attack, roll 1d20 against the target.",
+        },
+        {
+            "schema_version": "1.0.0",
+            "sourcebook": "DCC Starter Set",
+            "type": "rule",
+            "name": "Move",
+            "action_cost": "1 Action",
+            "body_text": "You move your speed.",
+        },
+    ]
+    gemini_file.write_text(f"```json\n{json.dumps(gemini_data)}\n```", encoding="utf-8")
+
+    vault_dir = tmp_path / "okf_vault"
+    canonical_sourcebook = "Dungeon Crawler Carl Roleplaying Game"
+    saved = shred_chapter(docling_file, gemini_file, vault_dir, default_sourcebook=canonical_sourcebook)
+
+    assert len(saved) == 2
+
+    # Check that both files are saved under the canonical sourcebook directory
+    source_slug = sanitize_slug(canonical_sourcebook)
+    attack_file = vault_dir / source_slug / "rules" / "attack.md"
+    move_file = vault_dir / source_slug / "rules" / "move.md"
+
+    assert attack_file.exists()
+    assert move_file.exists()
+
+    # Verify that hallucinated sourcebook folder was NOT created
+    assert not (vault_dir / "dcc_random_hallucination").exists()
+    assert not (vault_dir / "dcc_starter_set").exists()
+
+    # Verify content of attack was consolidated
+    content = yaml.safe_load(attack_file.read_text(encoding="utf-8").split("---\n")[1])
+    assert content["sourcebook"] == canonical_sourcebook

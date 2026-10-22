@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from ttrpg_markdown_pipeline.models import (
     OKFAdversary,
     OKFArmor,
@@ -157,6 +159,9 @@ def instantiate_okf_concept(item_dict: dict[str, Any], docling_body: str | None 
     c_type = str(item_dict.get("type", "rule")).lower()
     merged_dict = dict(item_dict)
 
+    if "category" not in merged_dict or not merged_dict["category"]:
+        merged_dict["category"] = "General"
+
     raw_body = ""
     if docling_body and docling_body.strip():
         # Prefer Docling verbatim layout text if matched, repaired with inline glyphs
@@ -218,11 +223,57 @@ def parse_gemini_json_payload(gemini_raw_text: str) -> list[dict[str, Any]]:
     return combined_items
 
 
+def consolidate_concepts(concepts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicates and merges concept dictionaries sharing (type, slug).
+
+    Merges non-null metadata and retains the richest/longest body_text and example_text.
+    Preserves original insertion order.
+    """
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+
+    for item in concepts:
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+
+        c_type = str(item.get("type", "rule")).lower()
+        slug = sanitize_slug(str(item["name"]))
+        key = (c_type, slug)
+
+        if key not in grouped:
+            grouped[key] = dict(item)
+            continue
+
+        existing = grouped[key]
+        for field, val in item.items():
+            if val is None or val == "":
+                continue
+
+            if field == "body_text":
+                if len(str(val).strip()) > len(str(existing.get("body_text", "")).strip()):
+                    existing["body_text"] = val
+            elif field == "example_text":
+                if not existing.get("example_text") or len(str(val).strip()) > len(
+                    str(existing.get("example_text", "")).strip()
+                ):
+                    existing["example_text"] = val
+            elif field == "traits" and isinstance(val, list):
+                existing_traits = existing.get("traits") or []
+                if isinstance(existing_traits, list):
+                    existing["traits"] = list(dict.fromkeys(existing_traits + val))
+                else:
+                    existing["traits"] = val
+            else:
+                if existing.get(field) is None or existing.get(field) == "":
+                    existing[field] = val
+
+    return list(grouped.values())
+
+
 def shred_chapter(
     docling_md_path: Path,
     gemini_output_path: Path,
     vault_dir: Path,
-    default_sourcebook: str = "Cosmere RPG",
+    default_sourcebook: str | None = None,
 ) -> list[Path]:
     """Shreds a single chapter's Docling & Gemini output into atomic OKF Markdown files in vault_dir."""
     docling_text = clean_extraction_artifacts(docling_md_path.read_text(encoding="utf-8"))
@@ -230,15 +281,19 @@ def shred_chapter(
 
     docling_sections = split_docling_by_headers(docling_text)
     concepts_raw = parse_gemini_json_payload(gemini_text)
+    concepts_consolidated = consolidate_concepts(concepts_raw)
 
     saved_files: list[Path] = []
 
-    for item in concepts_raw:
+    for item in concepts_consolidated:
         if not isinstance(item, dict) or "name" not in item:
             continue
 
-        if "sourcebook" not in item or not item["sourcebook"]:
+        # Enforce canonical sourcebook if provided; otherwise fallback to existing or Cosmere RPG
+        if default_sourcebook:
             item["sourcebook"] = default_sourcebook
+        elif "sourcebook" not in item or not item["sourcebook"]:
+            item["sourcebook"] = "Cosmere RPG"
 
         name = str(item["name"])
         slug = sanitize_slug(name)
@@ -246,20 +301,47 @@ def shred_chapter(
         # Look up matching Docling text section
         matched_body = docling_sections.get(slug)
         if not matched_body:
-            # Try fuzzy partial key match
+            # Normalized match
+            slug_clean = slug.replace("_", "")
             for k, sec in docling_sections.items():
-                if k in slug or slug in k:
+                if k.replace("_", "") == slug_clean:
                     matched_body = sec
                     break
 
-        concept = instantiate_okf_concept(item, docling_body=matched_body)
+        if not matched_body:
+            # Prefix match only for multi-word or long slugs (preventing false matches on short words)
+            for k, sec in docling_sections.items():
+                if (
+                    (len(k) >= 8 or "_" in k)
+                    and (len(slug) >= 8 or "_" in slug)
+                    and (slug.startswith(f"{k}_") or k.startswith(f"{slug}_"))
+                ):
+                    matched_body = sec
+                    break
 
-        sourcebook_slug = sanitize_slug(concept.sourcebook)
-        type_folder = f"{concept.type}s"
+        sourcebook_slug = sanitize_slug(str(item.get("sourcebook") or default_sourcebook))
+        type_folder = f"{str(item.get('type', 'rule')).lower()}s"
         target_dir = vault_dir / sourcebook_slug / type_folder
         target_dir.mkdir(parents=True, exist_ok=True)
 
         file_path = target_dir / f"{slug}.md"
+
+        # If file already exists in vault, merge existing data with new concept
+        if file_path.exists():
+            try:
+                existing_raw = file_path.read_text(encoding="utf-8")
+                parts = existing_raw.split("---\n")
+                if len(parts) >= 3:
+                    existing_meta = yaml.safe_load(parts[1]) or {}
+                    existing_body = parts[2].strip()
+                    existing_item = dict(existing_meta)
+                    existing_item["body_text"] = existing_body
+                    merged_items = consolidate_concepts([existing_item, item])
+                    item = merged_items[0]
+            except Exception:
+                pass
+
+        concept = instantiate_okf_concept(item, docling_body=matched_body)
         file_path.write_text(concept.to_markdown(), encoding="utf-8")
         saved_files.append(file_path)
 
