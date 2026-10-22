@@ -83,25 +83,37 @@ def link_concept_mentions(
     if not sorted_names:
         return body_text
 
-    # Match concept mentions that are not already inside markdown links [...](...)
-    # or inside inline code `...`
-    # We do a replacement pass using word boundaries
-    linked_text = body_text
+    tokens: dict[str, str] = {}
+    counter = 0
+
+    def protect_match(m: re.Match[str]) -> str:
+        nonlocal counter
+        ph = f"\x00TOKEN_{counter}\x00"
+        tokens[ph] = m.group(0)
+        counter += 1
+        return ph
+
+    # Protect code blocks, inline code, and existing markdown links
+    protect_pattern = re.compile(r"```[\s\S]*?```|`[^`\n]+`|\[[^\]]+\]\([^\)]+\)")
+    linked_text = protect_pattern.sub(protect_match, body_text)
 
     for name in sorted_names:
         target_concept = registry[name]
         rel_link = compute_relative_link(source_file, target_concept.file_path)
 
-        pattern = re.compile(
-            rf"(?<!\[)(?<!`)\b({re.escape(name)})\b(?![^\[]*\])(?![^`]*`)(?!\()",
-            re.IGNORECASE,
-        )
+        pattern = re.compile(rf"\b({re.escape(name)})\b", re.IGNORECASE)
 
         def replace_mention(m: re.Match[str], link: str = rel_link) -> str:
-            matched_str = m.group(1)
-            return f"[{matched_str}]({link})"
+            nonlocal counter
+            ph = f"\x00TOKEN_{counter}\x00"
+            tokens[ph] = f"[{m.group(1)}]({link})"
+            counter += 1
+            return ph
 
         linked_text = pattern.sub(replace_mention, linked_text)
+
+    for ph, original_or_link in tokens.items():
+        linked_text = linked_text.replace(ph, original_or_link)
 
     return linked_text
 

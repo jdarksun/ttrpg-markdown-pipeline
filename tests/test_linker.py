@@ -72,3 +72,31 @@ def test_cross_link_vault(tmp_path: Path):
 
     talent_content = talent_file.read_text(encoding="utf-8")
     assert "[Disengage](../rules/disengage.md)" in talent_content
+
+
+def test_link_concept_mentions_no_double_linking(tmp_path: Path):
+    vault = tmp_path / "vault"
+    rules_dir = vault / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+
+    disengage_file = rules_dir / "disengage.md"
+    disengage_file.write_text("---\nname: Disengage\ntype: rule\n---\n\nWithdraw.", encoding="utf-8")
+
+    heal_file = rules_dir / "heal.md"
+    heal_file.write_text("---\nname: Heal\ntype: rule\n---\n\nRestore health.", encoding="utf-8")
+
+    source_file = rules_dir / "item.md"
+    source_file.write_text("---\nname: Potion\ntype: item\n---\n\nItem.", encoding="utf-8")
+
+    reg = build_concept_registry(vault)
+
+    # Text that already has a link to Disengage, and code mentions
+    text = "You can [Disengage](disengage.md) to escape, or `Disengage` in code, and also heal your party."
+    result = link_concept_mentions(text, source_file, reg)
+
+    # [Disengage](disengage.md) should NOT be modified into [[Disengage]...](...)
+    assert "[Disengage](disengage.md)" in result
+    assert "[[Disengage]" not in result
+    assert "`Disengage`" in result
+    # "heal" should be linked
+    assert "[heal](heal.md)" in result
