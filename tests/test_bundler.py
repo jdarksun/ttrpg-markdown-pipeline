@@ -5,6 +5,7 @@ from pathlib import Path
 from ttrpg_markdown_pipeline.processors.bundler import (
     bundle_category,
     bundle_vault,
+    format_concept_for_bundle,
     sanitize_bundle_name,
 )
 
@@ -31,10 +32,37 @@ def test_bundle_category(tmp_path: Path):
     assert bundle_file is not None
     assert bundle_file.name == "Mistborn_All_Talents.md"
     content = bundle_file.read_text(encoding="utf-8")
+    assert "## Steel Bubble" in content
+    assert "## Iron Stance" in content
+    assert "```yaml" in content
     assert "name: Steel Bubble" in content
     assert "name: Iron Stance" in content
     assert "Creates bubble." in content
     assert "Anchors feet." in content
+
+
+def test_format_concept_for_bundle():
+    atomic_md = (
+        "---\n"
+        "schema_version: 1.0.0\n"
+        "type: rule\n"
+        "name: Attack\n"
+        "category: Combat\n"
+        "action_cost: '[1 Action]'\n"
+        "---\n\n"
+        "### Mechanics\n\n"
+        "When taking an attack, roll 1d20.\n\n"
+        "### Example Play\n\n"
+        "Joe: I swing my sword!"
+    )
+    formatted = format_concept_for_bundle(atomic_md)
+    assert formatted.startswith("## Attack\n\n```yaml\n")
+    assert "name: Attack" in formatted
+    assert "action_cost: '[1 Action]'" in formatted
+    assert "```\n\n### Mechanics" in formatted
+    assert "When taking an attack, roll 1d20." in formatted
+    assert "### Example Play" in formatted
+    assert "Joe: I swing my sword!" in formatted
 
 
 def test_bundle_vault(tmp_path: Path):
