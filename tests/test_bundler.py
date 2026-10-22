@@ -86,3 +86,72 @@ def test_bundle_vault(tmp_path: Path):
     bundle_names = {b.name for b in bundles}
     assert "Mistborn_All_Talents.md" in bundle_names
     assert "Mistborn_All_Weapons.md" in bundle_names
+
+
+def test_bundle_end_to_end_format_and_cleanliness(tmp_path: Path):
+    vault = tmp_path / "okf_vault"
+    rules_dir = vault / "dungeon_crawler_carl" / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+
+    r1 = rules_dir / "attack.md"
+    r1.write_text(
+        "---\n"
+        "schema_version: 1.0.0\n"
+        "type: rule\n"
+        "sourcebook: Dungeon Crawler Carl\n"
+        "name: Attack\n"
+        "category: Combat Actions\n"
+        "action_cost: '[1 Action]'\n"
+        "trigger: null\n"
+        "---\n\n"
+        "### Mechanics\n\n"
+        "Roll 1d20 to attack.\n\n"
+        "### Example Play\n\n"
+        "Joe: I hit the goblin!\n\n"
+        "Paige: Great hit.",
+        encoding="utf-8",
+    )
+
+    r2 = rules_dir / "intervene.md"
+    r2.write_text(
+        "---\n"
+        "schema_version: 1.0.0\n"
+        "type: rule\n"
+        "sourcebook: Dungeon Crawler Carl\n"
+        "name: Intervene\n"
+        "category: Reactions\n"
+        "action_cost: '[Reaction]'\n"
+        "trigger: When an ally is attacked\n"
+        "---\n\n"
+        "### Mechanics\n\n"
+        "Step in front of an attack.\n\n"
+        "### Example Play\n\n"
+        "Andrew: I step in front of Kai.",
+        encoding="utf-8",
+    )
+
+    out_dir = tmp_path / "bundles"
+    bundle_file = bundle_category(vault, "dungeon_crawler_carl", "rules", out_dir)
+    assert bundle_file is not None
+
+    bundle_text = bundle_file.read_text(encoding="utf-8")
+
+    # Assert standard ATX headings
+    assert "## Attack" in bundle_text
+    assert "## Intervene" in bundle_text
+
+    # Assert fenced YAML code blocks
+    assert "```yaml\nschema_version: 1.0.0\ntype: rule\nsourcebook: Dungeon Crawler Carl\nname: Attack" in bundle_text
+    assert (
+        "```yaml\nschema_version: 1.0.0\ntype: rule\nsourcebook: Dungeon Crawler Carl\nname: Intervene" in bundle_text
+    )
+
+    # Assert Mechanics and Example Play sections
+    assert "### Mechanics\n\nRoll 1d20 to attack." in bundle_text
+    assert "### Example Play\n\nJoe: I hit the goblin!" in bundle_text
+    assert "### Mechanics\n\nStep in front of an attack." in bundle_text
+    assert "### Example Play\n\nAndrew: I step in front of Kai." in bundle_text
+
+    # Ensure no Setext collisions (no mid-document '---' directly followed by 'schema_version')
+    assert "---\nschema_version" not in bundle_text
+    assert "#### schema_version" not in bundle_text
