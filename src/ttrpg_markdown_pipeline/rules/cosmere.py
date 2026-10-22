@@ -11,6 +11,10 @@ MECHANICS_KEYWORDS = [
     "adversar",  # Adversaries / Bestiary
     "equipment",  # Equipment & Gear
     "expertise",  # Cultural & Utility Expertises
+    "surge",  # Surges & Surgebinding
+    "endeavor",  # Endeavors
+    "conversation",  # Conversations
+    "companion",  # Animal Companions
 ]
 
 # Chapters containing these words describe worldbuilding, geography, culture, and factions
