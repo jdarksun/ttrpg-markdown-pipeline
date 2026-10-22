@@ -323,7 +323,8 @@ def shred_chapter(
                     break
 
         sourcebook_slug = sanitize_slug(str(item.get("sourcebook") or default_sourcebook))
-        type_folder = f"{str(item.get('type', 'rule')).lower()}s"
+        c_type = str(item.get("type", "rule")).lower()
+        type_folder = "adversaries" if c_type == "adversary" else f"{c_type}s"
         target_dir = vault_dir / sourcebook_slug / type_folder
         target_dir.mkdir(parents=True, exist_ok=True)
 

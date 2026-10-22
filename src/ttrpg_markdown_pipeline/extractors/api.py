@@ -56,11 +56,13 @@ async def generate_with_fallback_async(
                     break
 
                 if attempt == 5:
-                    print(f"[{ts}] [!] {model} unavailable after 5 attempts ({e.code}: {e.message[:80]}). Cascading to next model...")
+                    err_msg = f"{e.code}: {e.message[:60]}" if e.message else str(e.code)
+                    print(f"[{ts}] [!] {model} unavailable after 5 attempts ({err_msg}). Cascading...")
                     break
 
                 backoff = min(attempt * 12 if e.code in (429, 503) else attempt * 5, 60)
-                print(f"[{ts}] [!] Transient {model} error ({e.code}: {e.message[:80]}). Retrying in {backoff}s (attempt {attempt}/5)...")
+                err_msg = f"{e.code}: {e.message[:60]}" if e.message else str(e.code)
+                print(f"[{ts}] [!] Transient {model} error ({err_msg}). Retrying in {backoff}s ({attempt}/5)...")
                 await asyncio.sleep(backoff)
 
     raise RuntimeError("All models in the desirability path failed or exhausted quota.")
