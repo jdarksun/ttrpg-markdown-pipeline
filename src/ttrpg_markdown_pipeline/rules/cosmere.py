@@ -12,28 +12,36 @@ MECHANICS_KEYWORDS = [
 ]
 
 DEFAULT_PROMPT = """
-Convert this Cosmere RPG rules section into clean, highly structured Markdown.
+You are a precision TTRPG rules extraction engine.
+Analyze this Cosmere RPG rules section and extract all mechanical concepts, talents, actions, items, and rules into a STRICT JSON list of objects matching the Open Knowledge Format (OKF) schema.
 
-Strict Icon Translation Rules:
-1. Action Economy & Activation Icons:
-   - Single filled diamond -> `[1 Action]`
-   - Two diamonds -> `[2 Actions]`
-   - Three diamonds -> `[3 Actions]`
-   - Clockwise loop / circular arrow -> `[Reaction]`
-   - Open / winged diamond -> `[Free Action]`
-   - Star icon (★) or badge -> `[Special Activation]`
-   - Figure-8 / infinity symbol -> `[Passive]`
-2. Plot Die Icons (In Text & Rolls Only):
-   - Crossed keys / sunburst icon -> `[Opportunity]` (Never use this as a talent's Activation cost)
-   - Spiked skull / complication icon -> `[Complication]`
-3. Talent Formatting:
-   - Always format talent prerequisites and activation costs under the talent header as:
-     - **Prerequisites:** <prereqs>
-     - **Activation:** [1 Action] / [2 Actions] / [3 Actions] / [Reaction] / [Free Action] / [Special Activation] / [Passive]
-4. Content Integrity:
-   - Do NOT omit introductory text, class overviews, sidebars, or character archetype builds.
-   - Convert sidebars and designer notes into blockquotes (`> `).
-   - Omit recurring page headers, page numbers, and purely decorative image captions.
+CRITICAL INSTRUCTIONS:
+1. Output ONLY a valid JSON array of objects. Do not wrap with prose, introduction, or conversational text. Fenced markdown json (```json ... ```) is acceptable.
+2. For each extracted concept, output an object with:
+   - "schema_version": "1.0.0"
+   - "sourcebook": The sourcebook or publication identifier (e.g. "Mistborn World Guide", "Stormlight RPG")
+   - "type": One of "talent", "weapon", "armor", "item", "rule", or "adversary"
+   - "name": Canonical name of the concept (e.g. "Pewterarm Weaponcraft", "Longsword", "Disengage")
+   - "category": Parent tree, group, or section (e.g. "Pewter Allomancy", "Light Weaponry", "Combat Actions")
+   - Concept-specific fields:
+     * For "talent": "prerequisites" (string or null) and "activation" (standardized: "[1 Action]", "[2 Actions]", "[3 Actions]", "[Reaction]", "[Free Action]", "[Special Activation]", or "[Passive]")
+     * For "weapon": "damage", "range", "traits" (list of strings), "cost"
+     * For "armor": "deflect", "traits" (list of strings), "cost"
+     * For "item": "cost", "weight"
+     * For "rule": "action_cost" (standardized activation), "trigger"
+     * For "adversary": "tier", "role"
+   - "body_text": The complete rules description and mechanical effects. Do NOT summarize or omit rules nuances.
+
+Strict Icon Translation Rules for body_text & activation:
+- Single filled diamond -> `[1 Action]`
+- Two diamonds -> `[2 Actions]`
+- Three diamonds -> `[3 Actions]`
+- Clockwise loop / circular arrow -> `[Reaction]`
+- Open / winged diamond -> `[Free Action]`
+- Star icon (★) or badge -> `[Special Activation]`
+- Figure-8 / infinity symbol -> `[Passive]`
+- Crossed keys / sunburst icon -> `[Opportunity]`
+- Spiked skull / complication icon -> `[Complication]`
 """  # noqa: E501
 
 # Case-insensitive / normalized inline phrase fixes for Cosmere rulebooks
