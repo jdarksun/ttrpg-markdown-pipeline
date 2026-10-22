@@ -20,7 +20,14 @@ from ttrpg_markdown_pipeline.processors.bundler import bundle_vault
 from ttrpg_markdown_pipeline.processors.linker import cross_link_vault
 from ttrpg_markdown_pipeline.processors.patch import patch_file
 from ttrpg_markdown_pipeline.processors.shredder import shred_chapter
-from ttrpg_markdown_pipeline.rules.cosmere import MECHANICS_KEYWORDS
+from ttrpg_markdown_pipeline.rules.cosmere import (
+    ADVENTURE_KEYWORDS,
+    ADVENTURE_PROMPT,
+    DEFAULT_PROMPT,
+    LORE_KEYWORDS,
+    LORE_PROMPT,
+    MECHANICS_KEYWORDS,
+)
 
 
 @dataclass
@@ -28,6 +35,7 @@ class Chapter:
     path: Path
     title: str
     mechanics: bool
+    mode: str = "mechanics"
 
 
 def sanitize_filename(name: str) -> str:
@@ -42,6 +50,8 @@ def split_pdf_by_chapters(
     output_dir: Path,
     *,
     all_mechanics: bool = False,
+    include_lore: bool = False,
+    adventure_mode: bool = False,
 ) -> list[Chapter]:
     """Reads the TOC, splits the PDF into chapter files, and returns their metadata.
 
@@ -93,8 +103,25 @@ def split_pdf_by_chapters(
                 chap_doc.save(out_path)
                 chap_doc.close()
 
-            needs_mechanics = all_mechanics or any(kw in clean_title.lower() for kw in MECHANICS_KEYWORDS)
-            generated.append(Chapter(path=out_path, title=clean_title, mechanics=needs_mechanics))
+            is_mechanics = all_mechanics or any(kw in clean_title.lower() for kw in MECHANICS_KEYWORDS)
+            is_adventure = adventure_mode and any(kw in clean_title.lower() for kw in ADVENTURE_KEYWORDS)
+            is_lore = include_lore and any(kw in clean_title.lower() for kw in LORE_KEYWORDS)
+
+            if is_mechanics:
+                chap_mode = "mechanics"
+            elif is_adventure:
+                chap_mode = "adventure"
+            elif is_lore:
+                chap_mode = "lore"
+            elif adventure_mode:
+                chap_mode = "adventure"
+            elif include_lore:
+                chap_mode = "lore"
+            else:
+                chap_mode = "skip"
+
+            needs_gemini = chap_mode != "skip"
+            generated.append(Chapter(path=out_path, title=clean_title, mechanics=needs_gemini, mode=chap_mode))
     finally:
         doc.close()
 
@@ -143,16 +170,26 @@ async def process_chapter_async(
     # Phase 2 & 3: Async Gemini Vision & OKF Concept Shredding
     if chap.mechanics and not docling_only:
         gemini_md = tagged_md_path(md_out_dir, stem, GEMINI_TAG)
-        print("  -> Phase 2: Async Gemini Vision Extraction (OKF Concepts)")
+        prompt_label = getattr(chap, "mode", "mechanics").capitalize()
+        print(f"  -> Phase 2: Async Gemini Vision Extraction (Mode: {prompt_label})")
         if gemini_md.exists() and not force:
             print(f"       -> Skipping (already exists): {gemini_md.name}")
         else:
+            chap_mode = getattr(chap, "mode", "mechanics")
+            if chap_mode == "adventure":
+                prompt_to_use = ADVENTURE_PROMPT
+            elif chap_mode == "lore":
+                prompt_to_use = LORE_PROMPT
+            else:
+                prompt_to_use = DEFAULT_PROMPT
+
             await extract_pdf_async(
                 chap.path,
                 gemini_md,
                 chunk_size=chunk_size,
                 strategy=gemini_strategy,
                 max_concurrency=max_concurrency,
+                prompt=prompt_to_use,
             )
 
         print("  -> Phase 3: Shredding into OKF Vault")
@@ -166,7 +203,7 @@ async def process_chapter_async(
     elif chap.mechanics:
         print("  -> Pipeline routing: --docling-only set. Bypassing Gemini & OKF shredding.")
     else:
-        print("  -> Pipeline routing: No mechanics keywords detected. Bypassing Gemini & OKF shredding.")
+        print("  -> Pipeline routing: Narrative chapter (bypassing Gemini & OKF shredding).")
 
     return docling_md
 
@@ -213,13 +250,20 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     # 1. Slice or select document
     if getattr(args, "no_split", False):
         print(f"\n[Orchestrator] Processing {args.pdf_path.name} as a single document (--no-split)...")
-        chapters = [Chapter(path=args.pdf_path, title=args.pdf_path.stem, mechanics=True)]
+        chap_mode = (
+            "adventure"
+            if getattr(args, "adventure_mode", False)
+            else ("lore" if getattr(args, "include_lore", False) else "mechanics")
+        )
+        chapters = [Chapter(path=args.pdf_path, title=args.pdf_path.stem, mechanics=True, mode=chap_mode)]
     else:
         try:
             chapters = split_pdf_by_chapters(
                 args.pdf_path,
                 pdf_split_dir,
                 all_mechanics=getattr(args, "all_mechanics", False),
+                include_lore=getattr(args, "include_lore", False),
+                adventure_mode=getattr(args, "adventure_mode", False),
             )
         except ValueError as e:
             sys.exit(f"[!] Error: {e}")
@@ -316,6 +360,16 @@ def main() -> None:
         "--all-mechanics",
         action="store_true",
         help="Extract OKF concepts for all chapters, ignoring keyword filtering.",
+    )
+    parser.add_argument(
+        "--include-lore",
+        action="store_true",
+        help="Extract worldbuilding, factions, and lore chapters into OKFLoreEntry concepts.",
+    )
+    parser.add_argument(
+        "--adventure-mode",
+        action="store_true",
+        help="Extract interactive adventure nodes and encounters into OKFAdventureNode concepts and compile GM Campaign Guide.",  # noqa: E501
     )
     parser.add_argument(
         "--docling-only",

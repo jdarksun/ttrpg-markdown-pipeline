@@ -11,6 +11,11 @@ from ttrpg_markdown_pipeline.orchestrator import (
     sanitize_filename,
     split_pdf_by_chapters,
 )
+from ttrpg_markdown_pipeline.rules.cosmere import (
+    ADVENTURE_PROMPT,
+    DEFAULT_PROMPT,
+    LORE_PROMPT,
+)
 
 
 def test_sanitize_filename():
@@ -160,3 +165,80 @@ def test_split_pdf_by_chapters_all_mechanics(sample_pdf_with_toc: Path, tmp_path
     assert chapters[0].mechanics is True
     assert chapters[1].mechanics is True
     assert chapters[2].mechanics is True
+
+
+def test_split_pdf_by_chapters_include_lore_and_adventure(tmp_path: Path):
+    pdf_path = tmp_path / "Adventure_Book.pdf"
+    doc = pymupdf.open()
+    for i in range(10):
+        doc.new_page().insert_text((72, 72), f"Physical Page {i + 1}")
+
+    toc = [
+        [1, "Introduction", 1],
+        [1, "Part 1: Alethi Ambush", 3],
+        [1, "Appendix A: Equipment", 7],
+    ]
+    doc.set_toc(toc)
+    doc.save(pdf_path)
+    doc.close()
+
+    split_dir = tmp_path / "PDF_Chapters"
+    chapters = split_pdf_by_chapters(pdf_path, split_dir, adventure_mode=True)
+
+    assert len(chapters) == 3
+    # Part 1 should be routed to adventure mode
+    assert chapters[1].mode == "adventure"
+    assert chapters[1].mechanics is True
+    # Equipment is mechanics
+    assert chapters[2].mode == "mechanics"
+    assert chapters[2].mechanics is True
+
+
+def test_process_chapter_prompt_routing(tmp_path: Path):
+    pdf = tmp_path / "01-Ambush.pdf"
+    pdf.write_text("dummy", encoding="utf-8")
+    md_dir = tmp_path / "md"
+    md_dir.mkdir()
+    converter = MagicMock()
+
+    # Adventure chapter
+    chap_adv = Chapter(path=pdf, title="Alethi Ambush", mechanics=True, mode="adventure")
+    with (
+        patch("ttrpg_markdown_pipeline.orchestrator.convert_pdf") as mock_convert,
+        patch("ttrpg_markdown_pipeline.orchestrator.extract_pdf_async") as mock_extract_async,
+        patch("ttrpg_markdown_pipeline.orchestrator.shred_chapter"),
+        patch("ttrpg_markdown_pipeline.orchestrator.patch_file"),
+    ):
+        mock_convert.side_effect = lambda src, dst, **kwargs: dst.write_text("docling", encoding="utf-8") or dst
+        process_chapter(chap_adv, md_dir, converter)
+        mock_extract_async.assert_called_once()
+        _, kwargs = mock_extract_async.call_args
+        assert kwargs["prompt"] == ADVENTURE_PROMPT
+
+    # Lore chapter
+    chap_lore = Chapter(path=pdf, title="Roshar Lore", mechanics=True, mode="lore")
+    with (
+        patch("ttrpg_markdown_pipeline.orchestrator.convert_pdf") as mock_convert,
+        patch("ttrpg_markdown_pipeline.orchestrator.extract_pdf_async") as mock_extract_async,
+        patch("ttrpg_markdown_pipeline.orchestrator.shred_chapter"),
+        patch("ttrpg_markdown_pipeline.orchestrator.patch_file"),
+    ):
+        mock_convert.side_effect = lambda src, dst, **kwargs: dst.write_text("docling", encoding="utf-8") or dst
+        process_chapter(chap_lore, md_dir, converter)
+        mock_extract_async.assert_called_once()
+        _, kwargs = mock_extract_async.call_args
+        assert kwargs["prompt"] == LORE_PROMPT
+
+    # Default mechanics chapter
+    chap_mech = Chapter(path=pdf, title="Combat Rules", mechanics=True, mode="mechanics")
+    with (
+        patch("ttrpg_markdown_pipeline.orchestrator.convert_pdf") as mock_convert,
+        patch("ttrpg_markdown_pipeline.orchestrator.extract_pdf_async") as mock_extract_async,
+        patch("ttrpg_markdown_pipeline.orchestrator.shred_chapter"),
+        patch("ttrpg_markdown_pipeline.orchestrator.patch_file"),
+    ):
+        mock_convert.side_effect = lambda src, dst, **kwargs: dst.write_text("docling", encoding="utf-8") or dst
+        process_chapter(chap_mech, md_dir, converter)
+        mock_extract_async.assert_called_once()
+        _, kwargs = mock_extract_async.call_args
+        assert kwargs["prompt"] == DEFAULT_PROMPT
