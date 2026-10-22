@@ -46,7 +46,11 @@ class OKFConcept(BaseModel):
     sourcebook: str = Field(..., description="Sourcebook or publication identifier (e.g. 'Mistborn World Guide')")
     name: str = Field(..., description="Canonical name of the concept")
     category: str = Field(..., description="Categorization or parent group (e.g. 'Steel Allomancy', 'Core Actions')")
-    body_text: str = Field(default="", description="Markdown body text describing the concept")
+    body_text: str = Field(default="", description="Markdown body text describing the concept mechanics")
+    example_text: str | None = Field(
+        default=None,
+        description="Gameplay example or dialogue transcript illustrating the concept",
+    )
 
     @field_validator("name", "category", "sourcebook", mode="before")
     @classmethod
@@ -56,8 +60,8 @@ class OKFConcept(BaseModel):
         return v
 
     def to_markdown(self) -> str:
-        """Serializes the model into a YAML frontmatter block followed by body_text."""
-        data = self.model_dump(exclude={"body_text"})
+        """Serializes the model into a YAML frontmatter block followed by body_text and optional example_text."""
+        data = self.model_dump(exclude={"body_text", "example_text"})
         # Clean YAML dump
         frontmatter = yaml.safe_dump(
             data,
@@ -66,9 +70,20 @@ class OKFConcept(BaseModel):
             default_flow_style=False,
         ).strip()
         body = self.body_text.strip()
-        if body:
-            return f"---\n{frontmatter}\n---\n\n{body}\n"
-        return f"---\n{frontmatter}\n---\n"
+        example = self.example_text.strip() if self.example_text else None
+
+        parts = [f"---\n{frontmatter}\n---"]
+        if body and example:
+            parts.append(f"\n### Mechanics\n\n{body}")
+            parts.append(f"\n### Example Play\n\n{example}\n")
+        elif body:
+            parts.append(f"\n{body}\n")
+        elif example:
+            parts.append(f"\n### Example Play\n\n{example}\n")
+        else:
+            parts.append("\n")
+
+        return "\n".join(parts)
 
 
 class OKFTalent(OKFConcept):

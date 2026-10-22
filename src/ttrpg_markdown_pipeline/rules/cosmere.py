@@ -31,6 +31,7 @@ CRITICAL INSTRUCTIONS:
      * For "rule": "action_cost" (standardized activation), "trigger"
      * For "adversary": "tier", "role"
    - "body_text": The complete rules description and mechanical effects. Do NOT summarize or omit rules nuances.
+   - "example_text": Any gameplay dialogue transcripts, play examples, or in-character banter illustrating the rule (or null if none). Keep pure mechanics in body_text.
 
 Strict Icon Translation Rules for body_text & activation:
 - Single filled diamond -> `[1 Action]`

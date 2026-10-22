@@ -46,6 +46,29 @@ def test_okf_concept_to_markdown():
     frontmatter_dict = yaml.safe_load(parts[1])
     assert frontmatter_dict["name"] == "Allomancy Overview"
     assert "body_text" not in frontmatter_dict
+    assert "example_text" not in frontmatter_dict
+
+
+def test_okf_concept_to_markdown_with_example():
+    concept = OKFConcept(
+        schema_version="1.0.0",
+        type="rule",
+        sourcebook="DCC RPG",
+        name="Attack",
+        category="Combat",
+        body_text="A crawler strikes at a Mob with a weapon.",
+        example_text="Joe: Roll your d20 to hit.\nPaige: Got a 16!",
+    )
+
+    md = concept.to_markdown()
+    assert "### Mechanics\n\nA crawler strikes at a Mob with a weapon." in md
+    assert "### Example Play\n\nJoe: Roll your d20 to hit.\nPaige: Got a 16!" in md
+
+    # Neither body_text nor example_text should appear in frontmatter
+    parts = md.split("---\n")
+    frontmatter_dict = yaml.safe_load(parts[1])
+    assert "body_text" not in frontmatter_dict
+    assert "example_text" not in frontmatter_dict
 
 
 def test_okf_talent_normalization():
