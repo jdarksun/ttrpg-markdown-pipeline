@@ -50,12 +50,17 @@ async def generate_with_fallback_async(
                     _EXHAUSTED_MODELS.add(model)
                     break
 
-                if attempt == 3:
-                    print(f"[{ts}] [!] {model} unavailable after 3 attempts. Cascading to next model...")
+                if e.code == 404 or (e.message and "no longer available" in e.message.lower()):
+                    print(f"[{ts}] [!] {model} unavailable or deprecated ({e.code}). Cascading to next model...")
+                    _EXHAUSTED_MODELS.add(model)
                     break
 
-                backoff = attempt * 4
-                print(f"[{ts}] [!] Transient {model} error. Retrying in {backoff}s (attempt {attempt}/3)...")
+                if attempt == 3:
+                    print(f"[{ts}] [!] {model} unavailable after 3 attempts ({e.code}: {e.message[:80]}). Cascading to next model...")
+                    break
+
+                backoff = attempt * 10 if e.code == 429 else attempt * 4
+                print(f"[{ts}] [!] Transient {model} error ({e.code}: {e.message[:80]}). Retrying in {backoff}s (attempt {attempt}/3)...")
                 await asyncio.sleep(backoff)
 
     raise RuntimeError("All models in the desirability path failed or exhausted quota.")
