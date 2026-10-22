@@ -39,15 +39,26 @@ def build_concept_registry(vault_dir: Path) -> dict[str, RegisteredConcept]:
 
         try:
             frontmatter = yaml.safe_load(parts[1])
-            if isinstance(frontmatter, dict) and "name" in frontmatter:
-                raw_name = str(frontmatter["name"]).strip()
-                if raw_name:
-                    reg = RegisteredConcept(
-                        name=raw_name,
-                        file_path=md_file.resolve(),
-                        slug=md_file.stem,
-                    )
-                    registry[raw_name.lower()] = reg
+            if isinstance(frontmatter, dict):
+                if "name" in frontmatter:
+                    raw_name = str(frontmatter["name"]).strip()
+                    if raw_name:
+                        reg = RegisteredConcept(
+                            name=raw_name,
+                            file_path=md_file.resolve(),
+                            slug=md_file.stem,
+                        )
+                        registry[raw_name.lower()] = reg
+
+                if "node_id" in frontmatter and frontmatter.get("type") == "adventure_node":
+                    node_id = str(frontmatter["node_id"]).strip()
+                    if node_id:
+                        node_reg = RegisteredConcept(
+                            name=f"Node {node_id}",
+                            file_path=md_file.resolve(),
+                            slug=md_file.stem,
+                        )
+                        registry[f"node {node_id}".lower()] = node_reg
         except yaml.YAMLError:
             continue
 

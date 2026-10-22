@@ -3,9 +3,11 @@
 from pathlib import Path
 
 from ttrpg_markdown_pipeline.processors.bundler import (
+    bundle_campaign,
     bundle_category,
     bundle_vault,
     format_concept_for_bundle,
+    natural_sort_key,
     sanitize_bundle_name,
 )
 
@@ -155,3 +157,104 @@ def test_bundle_end_to_end_format_and_cleanliness(tmp_path: Path):
     # Ensure no Setext collisions (no mid-document '---' directly followed by 'schema_version')
     assert "---\nschema_version" not in bundle_text
     assert "#### schema_version" not in bundle_text
+
+
+def test_natural_sort_key():
+    files = [
+        Path("a10_climax.md"),
+        Path("a1_intro.md"),
+        Path("a2_crossroads.md"),
+        Path("b1_part2.md"),
+    ]
+    sorted_files = sorted(files, key=natural_sort_key)
+    expected = [
+        Path("a1_intro.md"),
+        Path("a2_crossroads.md"),
+        Path("a10_climax.md"),
+        Path("b1_part2.md"),
+    ]
+    assert sorted_files == expected
+
+
+def test_bundle_campaign(tmp_path: Path):
+    vault = tmp_path / "okf_vault"
+    adv_dir = vault / "stormlight_solo" / "adventure_nodes"
+    adv_dir.mkdir(parents=True, exist_ok=True)
+
+    adv1 = adv_dir / "a1_intro.md"
+    adv1.write_text(
+        "---\n"
+        "schema_version: 1.0.0\n"
+        "type: adventure_node\n"
+        "name: Ambush Opening\n"
+        "node_id: A1\n"
+        "---\n\n"
+        "### Read-Aloud\n\n"
+        "> Arrows rain down.\n\n"
+        "### Scene & Mechanics\n\n"
+        "Parshendi attack.",
+        encoding="utf-8",
+    )
+
+    adv2 = adv_dir / "a2_charge.md"
+    adv2.write_text(
+        "---\n"
+        "schema_version: 1.0.0\n"
+        "type: adventure_node\n"
+        "name: Counter Attack\n"
+        "node_id: A2\n"
+        "---\n\n"
+        "### Scene & Mechanics\n\n"
+        "You counter-charge the archers.",
+        encoding="utf-8",
+    )
+
+    # Sibling adversary directory
+    adv_monsters = vault / "stormlight_solo" / "adversaries"
+    adv_monsters.mkdir(parents=True, exist_ok=True)
+    axehound = adv_monsters / "axehound.md"
+    axehound.write_text(
+        "---\n"
+        "schema_version: 1.0.0\n"
+        "type: adversary\n"
+        "name: Axehound\n"
+        "tier: 1\n"
+        "---\n\n"
+        "### Mechanics\n\n"
+        "Fierce crustacean-canine beast.",
+        encoding="utf-8",
+    )
+
+    out_dir = tmp_path / "bundles"
+    campaign_files = bundle_campaign(vault, out_dir)
+
+    assert len(campaign_files) == 1
+    guide = campaign_files[0]
+    assert guide.name == "Stormlight_Solo_GM_Campaign_Guide.md"
+
+    text = guide.read_text(encoding="utf-8")
+    assert "# Stormlight Solo - Interactive GM Campaign Guide" in text
+    assert "> ## GM / Solo Referee System Instructions" in text
+    assert "### Operational Protocol:" in text
+    assert "## Ambush Opening" in text
+    assert "## Counter Attack" in text
+    assert "# Module Compendium: Adversaries" in text
+    assert "## Axehound" in text
+    assert "Fierce crustacean-canine beast." in text
+
+
+def test_bundle_vault_includes_campaign(tmp_path: Path):
+    vault = tmp_path / "okf_vault"
+    adv_dir = vault / "stormlight_solo" / "adventure_nodes"
+    adv_dir.mkdir(parents=True, exist_ok=True)
+    (adv_dir / "a1.md").write_text(
+        "---\ntype: adventure_node\nname: Scene 1\nnode_id: A1\n---\n\nScene 1 text.",
+        encoding="utf-8",
+    )
+
+    out_dir = tmp_path / "bundles"
+    bundles = bundle_vault(vault, out_dir)
+    names = {b.name for b in bundles}
+
+    assert "Stormlight_Solo_All_Adventure_Nodes.md" in names
+    assert "Stormlight_Solo_GM_Campaign_Guide.md" in names
