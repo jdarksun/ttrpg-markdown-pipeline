@@ -1,5 +1,5 @@
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pymupdf
 import pytest
@@ -74,7 +74,7 @@ def test_process_chapter_narrative_routing(tmp_path: Path):
 
     with (
         patch("ttrpg_markdown_pipeline.orchestrator.convert_pdf") as mock_convert,
-        patch("ttrpg_markdown_pipeline.orchestrator.extract_pdf") as mock_extract,
+        patch("ttrpg_markdown_pipeline.orchestrator.extract_pdf_async") as mock_extract_async,
         patch("ttrpg_markdown_pipeline.orchestrator.patch_file") as mock_patch,
     ):
         mock_convert.side_effect = lambda src, dst, **kwargs: dst.write_text("lore", encoding="utf-8") or dst
@@ -83,7 +83,7 @@ def test_process_chapter_narrative_routing(tmp_path: Path):
 
         assert final_md == md_dir / "01-Lore - DOCLING.md"
         mock_convert.assert_called_once()
-        mock_extract.assert_not_called()
+        mock_extract_async.assert_not_called()
         mock_patch.assert_called_once_with(final_md)
 
 
@@ -92,25 +92,36 @@ def test_process_chapter_mechanics_routing(tmp_path: Path):
     pdf.write_text("dummy", encoding="utf-8")
     md_dir = tmp_path / "md"
     md_dir.mkdir()
+    vault_dir = tmp_path / "okf_vault"
 
     chap = Chapter(path=pdf, title="Heroic Paths", mechanics=True)
     converter = MagicMock()
 
     with (
         patch("ttrpg_markdown_pipeline.orchestrator.convert_pdf") as mock_convert,
-        patch("ttrpg_markdown_pipeline.orchestrator.extract_pdf") as mock_extract,
-        patch("ttrpg_markdown_pipeline.orchestrator.merge_chapter") as mock_merge,
+        patch("ttrpg_markdown_pipeline.orchestrator.extract_pdf_async", new_callable=AsyncMock) as mock_extract_async,
+        patch("ttrpg_markdown_pipeline.orchestrator.shred_chapter") as mock_shred,
         patch("ttrpg_markdown_pipeline.orchestrator.patch_file") as mock_patch,
     ):
         mock_convert.side_effect = lambda src, dst, **kwargs: dst.write_text("docling", encoding="utf-8") or dst
-        mock_extract.side_effect = lambda src, dst, **kwargs: dst.write_text("gemini", encoding="utf-8") or dst
+        mock_extract_async.side_effect = lambda src, dst, **kwargs: dst.write_text("gemini", encoding="utf-8") or dst
+        mock_shred.return_value = [vault_dir / "sample.md"]
 
-        final_md = process_chapter(chap, md_dir, converter, force=False, docling_only=False, chunk_size=8)
+        final_md = process_chapter(
+            chap,
+            md_dir,
+            converter,
+            force=False,
+            docling_only=False,
+            chunk_size=8,
+            sourcebook="Mistborn",
+            vault_dir=vault_dir,
+        )
 
-        assert final_md == md_dir / "04-Paths - MERGED.md"
+        assert final_md == md_dir / "04-Paths - DOCLING.md"
         mock_convert.assert_called_once()
-        mock_extract.assert_called_once()
-        mock_merge.assert_called_once()
+        mock_extract_async.assert_called_once()
+        mock_shred.assert_called_once()
         mock_patch.assert_called_once_with(final_md)
 
 
@@ -120,13 +131,13 @@ def test_process_chapter_docling_only_flag(tmp_path: Path):
     md_dir = tmp_path / "md"
     md_dir.mkdir()
 
-    # Even though mechanics=True, docling_only=True bypasses Gemini
     chap = Chapter(path=pdf, title="Heroic Paths", mechanics=True)
     converter = MagicMock()
 
     with (
         patch("ttrpg_markdown_pipeline.orchestrator.convert_pdf") as mock_convert,
-        patch("ttrpg_markdown_pipeline.orchestrator.extract_pdf") as mock_extract,
+        patch("ttrpg_markdown_pipeline.orchestrator.extract_pdf_async") as mock_extract_async,
+        patch("ttrpg_markdown_pipeline.orchestrator.shred_chapter") as mock_shred,
         patch("ttrpg_markdown_pipeline.orchestrator.patch_file") as mock_patch,
     ):
         mock_convert.side_effect = lambda src, dst, **kwargs: dst.write_text("docling", encoding="utf-8") or dst
@@ -135,5 +146,6 @@ def test_process_chapter_docling_only_flag(tmp_path: Path):
 
         assert final_md == md_dir / "04-Paths - DOCLING.md"
         mock_convert.assert_called_once()
-        mock_extract.assert_not_called()
+        mock_extract_async.assert_not_called()
+        mock_shred.assert_not_called()
         mock_patch.assert_called_once_with(final_md)

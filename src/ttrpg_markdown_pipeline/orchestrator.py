@@ -1,4 +1,9 @@
+"""Cosmere / TTRPG Pipeline Orchestrator with Open Knowledge Format (OKF) Architecture."""
+
+from __future__ import annotations
+
 import argparse
+import asyncio
 import re
 import sys
 from dataclasses import dataclass
@@ -8,11 +13,13 @@ from typing import Any
 import pymupdf
 from docling.document_converter import DocumentConverter
 
-from ttrpg_markdown_pipeline.common import DOCLING_TAG, GEMINI_TAG, MERGED_TAG, clean_path, tagged_md_path
+from ttrpg_markdown_pipeline.common import DOCLING_TAG, GEMINI_TAG, clean_path, tagged_md_path
+from ttrpg_markdown_pipeline.extractors.api import extract_pdf_async
 from ttrpg_markdown_pipeline.extractors.docling import convert_pdf
-from ttrpg_markdown_pipeline.extractors.gemini import extract_pdf
-from ttrpg_markdown_pipeline.processors.merge import merge_chapter
+from ttrpg_markdown_pipeline.processors.bundler import bundle_vault
+from ttrpg_markdown_pipeline.processors.linker import cross_link_vault
 from ttrpg_markdown_pipeline.processors.patch import patch_file
+from ttrpg_markdown_pipeline.processors.shredder import shred_chapter
 from ttrpg_markdown_pipeline.rules.cosmere import MECHANICS_KEYWORDS
 
 
@@ -25,11 +32,8 @@ class Chapter:
 
 def sanitize_filename(name: str) -> str:
     """Removes invalid filename characters, control characters, and collapses whitespace."""
-    # Replace newlines, carriage returns, and tabs with a single space
     cleaned = re.sub(r"[\r\n\t]+", " ", name)
-    # Remove characters forbidden on Windows and Unix file systems
     cleaned = re.sub(r'[\\/*?:"<>|]', "", cleaned)
-    # Collapse multiple consecutive whitespace characters and trim
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
@@ -46,14 +50,10 @@ def split_pdf_by_chapters(pdf_path: Path, output_dir: Path) -> list[Chapter]:
         if not toc:
             raise ValueError("No Table of Contents found in the PDF to determine splits.")
 
-        # Find the main structural nodes (usually Level 1, or Level 2 if nested under 'Parts')
-        # We'll look specifically for "Chapter" or assume top-level items are the splits.
         chapters: list[dict[str, Any]] = []
         for item in toc:
             lvl, title, page = item
-            # Some RPG PDFs use Level 1 for "Part 1" and Level 2 for "Chapter 4"
             is_chapter_node = "chapter" in title.lower() or lvl == 1
-            # Avoid duplicating nested chapters if we already matched them
             is_new_page = not chapters or chapters[-1]["page"] != page
             if is_chapter_node and is_new_page:
                 chapters.append({"title": title, "page": page})
@@ -67,12 +67,9 @@ def split_pdf_by_chapters(pdf_path: Path, output_dir: Path) -> list[Chapter]:
         print(f"[Orchestrator] Identified {len(chapters)} chapters. Slicing PDF...")
 
         for i, chap in enumerate(chapters):
-            start_page = chap["page"] - 1  # PyMuPDF pages are 0-indexed, TOC is 1-indexed
-
-            # End page is the start of the next chapter, or the end of the document
+            start_page = chap["page"] - 1
             end_page = chapters[i + 1]["page"] - 2 if i + 1 < len(chapters) else len(doc) - 1
 
-            # Format: 04-Heroic_Paths.pdf
             chap_num = f"{i:02d}"
             match = re.search(r"Chapter (\d+)", chap["title"], re.IGNORECASE)
             if match:
@@ -91,9 +88,7 @@ def split_pdf_by_chapters(pdf_path: Path, output_dir: Path) -> list[Chapter]:
                 chap_doc.save(out_path)
                 chap_doc.close()
 
-            # Determine routing strategy
             needs_mechanics = any(kw in clean_title.lower() for kw in MECHANICS_KEYWORDS)
-
             generated.append(Chapter(path=out_path, title=clean_title, mechanics=needs_mechanics))
     finally:
         doc.close()
@@ -113,57 +108,171 @@ class LazyConverter:
         return self._converter
 
 
-def process_chapter(
+async def process_chapter_async(
     chap: Chapter,
     md_out_dir: Path,
+    vault_dir: Path,
     converter: LazyConverter,
+    sourcebook: str,
     *,
     force: bool,
     docling_only: bool,
     chunk_size: int,
     gemini_strategy: str = "quality",
+    max_concurrency: int = 3,
 ) -> Path:
-    """Run the extraction pipeline for one chapter and return the path of its final Markdown file."""
+    """Run the extraction pipeline for one chapter and return the path of its primary Markdown file."""
     stem = chap.path.stem
     docling_md = tagged_md_path(md_out_dir, stem, DOCLING_TAG)
 
-    # Step A: Docling Extraction (Runs for ALL chapters)
+    # Phase 1: Docling Ground Truth Extraction
     print("  -> Phase 1: Docling Extraction (Ground Truth & Lore)")
     if docling_md.exists() and not force:
         print(f"       -> Skipping (already exists): {docling_md.name}")
     else:
         convert_pdf(chap.path, docling_md, converter=converter.get(), force=force)
 
-    final_md = docling_md
+    # Apply inline symbol and glyph patches to the docling chapter file
+    patch_file(docling_md)
 
-    # Step B & C: Gemini Vision & Mechanics Merge (Runs ONLY for mechanics chapters)
+    # Phase 2 & 3: Async Gemini Vision & OKF Concept Shredding
     if chap.mechanics and not docling_only:
         gemini_md = tagged_md_path(md_out_dir, stem, GEMINI_TAG)
-        print("  -> Phase 2: Gemini Vision Extraction (Action Economy & Mechanics)")
+        print("  -> Phase 2: Async Gemini Vision Extraction (OKF Concepts)")
         if gemini_md.exists() and not force:
             print(f"       -> Skipping (already exists): {gemini_md.name}")
         else:
-            # Resumes from per-chapter chunk cache if a previous run was interrupted
-            extract_pdf(chap.path, gemini_md, chunk_size=chunk_size, strategy=gemini_strategy)
+            await extract_pdf_async(
+                chap.path,
+                gemini_md,
+                chunk_size=chunk_size,
+                strategy=gemini_strategy,
+                max_concurrency=max_concurrency,
+            )
 
-        print("  -> Phase 3: Merging Docling and Gemini")
-        final_md = tagged_md_path(md_out_dir, stem, MERGED_TAG)
-        merge_chapter(docling_md, gemini_md, final_md)
+        print("  -> Phase 3: Shredding into OKF Vault")
+        shredded = shred_chapter(
+            docling_md_path=docling_md,
+            gemini_output_path=gemini_md,
+            vault_dir=vault_dir,
+            default_sourcebook=sourcebook,
+        )
+        print(f"       -> Created/updated {len(shredded)} atomic concept file(s).")
     elif chap.mechanics:
-        print("  -> Pipeline routing: --docling-only set. Bypassing Gemini/Merge.")
+        print("  -> Pipeline routing: --docling-only set. Bypassing Gemini & OKF shredding.")
     else:
-        print("  -> Pipeline routing: No mechanics keywords detected. Bypassing Gemini/Merge.")
+        print("  -> Pipeline routing: No mechanics keywords detected. Bypassing Gemini & OKF shredding.")
 
-    # Step D: Glyph/icon text repairs. Must run AFTER the merge: it rewrites blank
-    # 'Activation:' lines, which merge_mechanics relies on to locate talent headers.
-    print("  -> Phase 4: Patching icon/glyph artifacts")
-    patch_file(final_md)
+    return docling_md
 
-    return final_md
+
+def process_chapter(
+    chap: Chapter,
+    md_out_dir: Path,
+    converter: LazyConverter,
+    *,
+    force: bool = False,
+    docling_only: bool = False,
+    chunk_size: int = 8,
+    gemini_strategy: str = "quality",
+    sourcebook: str = "TTRPG Rulebook",
+    vault_dir: Path | None = None,
+) -> Path:
+    """Synchronous compatibility wrapper for single-chapter processing."""
+    effective_vault = vault_dir or (md_out_dir.parent / "okf_vault")
+    return asyncio.run(
+        process_chapter_async(
+            chap=chap,
+            md_out_dir=md_out_dir,
+            vault_dir=effective_vault,
+            converter=converter,
+            sourcebook=sourcebook,
+            force=force,
+            docling_only=docling_only,
+            chunk_size=chunk_size,
+            gemini_strategy=gemini_strategy,
+        )
+    )
+
+
+async def run_pipeline_async(args: argparse.Namespace) -> None:
+    base_dir = args.output if args.output else args.pdf_path.parent / "Extracted_Rulebook"
+    pdf_split_dir = base_dir / "PDF_Chapters"
+    md_out_dir = base_dir / "Markdown"
+    vault_dir = base_dir / "okf_vault"
+    bundles_dir = base_dir / "bundles"
+
+    md_out_dir.mkdir(parents=True, exist_ok=True)
+    vault_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Slice the PDF
+    try:
+        chapters = split_pdf_by_chapters(args.pdf_path, pdf_split_dir)
+    except ValueError as e:
+        sys.exit(f"[!] Error: {e}")
+
+    print("\n" + "=" * 50)
+    print(" PIPELINE EXECUTION STARTING (OKF ARCHITECTURE)")
+    print("=" * 50)
+
+    converter = LazyConverter()
+    failures: list[tuple[str, str]] = []
+
+    # 2. Extract chapters and shred into vault
+    for idx, chap in enumerate(chapters, 1):
+        print(f"\n[{idx}/{len(chapters)}] Processing: {chap.path.name}")
+        try:
+            final_md = await process_chapter_async(
+                chap,
+                md_out_dir,
+                vault_dir,
+                converter,
+                sourcebook=args.sourcebook,
+                force=args.force,
+                docling_only=args.docling_only,
+                chunk_size=args.chunk_size,
+                gemini_strategy=args.gemini_strategy,
+                max_concurrency=args.concurrency,
+            )
+            print(f"  [SUCCESS] {chap.path.name} -> {final_md.name}")
+        except Exception as e:  # noqa: BLE001
+            print(f"  [FAILED] {chap.path.name}: {e}", file=sys.stderr)
+            failures.append((chap.path.name, str(e)))
+
+    # 3. Cross-link the OKF Vault
+    if not args.docling_only and vault_dir.exists():
+        print("\n" + "=" * 50)
+        print(" CROSS-LINKING OKF VAULT")
+        print("=" * 50)
+        linked_count = cross_link_vault(vault_dir)
+        print(f"  -> Cross-linked concept references across {linked_count} file(s).")
+
+        # 4. Generate NotebookLM category bundles
+        print("\n" + "=" * 50)
+        print(" GENERATING NOTEBOOKLM BUNDLES")
+        print("=" * 50)
+        bundles = bundle_vault(vault_dir, bundles_dir)
+        print(f"  -> Generated {len(bundles)} category bundle(s):")
+        for b in bundles:
+            print(f"     - {b.name}")
+
+    print("\n" + "=" * 50)
+    if failures:
+        print(f" FINISHED WITH {len(failures)} FAILED CHAPTER(S):")
+        for name, err in failures:
+            print(f"   - {name}: {err}")
+        print(" Re-run the same command to retry; completed work is cached.")
+    else:
+        print(" ALL CHAPTERS PROCESSED SUCCESSFULLY!")
+    print(f" Outputs saved to: {base_dir}")
+    print("=" * 50)
+
+    if failures:
+        sys.exit(1)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Cosmere RPG Full Pipeline Orchestrator")
+    parser = argparse.ArgumentParser(description="TTRPG Open Knowledge Format (OKF) Pipeline Orchestrator")
     parser.add_argument("pdf_path", type=clean_path, help="Path to the unsplit Master PDF.")
     parser.add_argument(
         "-o",
@@ -171,6 +280,13 @@ def main() -> None:
         type=clean_path,
         default=None,
         help="Output directory for generated files (default: '<pdf_dir>/Extracted_Rulebook').",
+    )
+    parser.add_argument(
+        "-s",
+        "--sourcebook",
+        type=str,
+        default="Cosmere RPG",
+        help="Sourcebook or publication name for OKF concept namespacing (default: 'Cosmere RPG').",
     )
     parser.add_argument(
         "-f",
@@ -181,7 +297,7 @@ def main() -> None:
     parser.add_argument(
         "--docling-only",
         action="store_true",
-        help="Skip the Gemini and merge phases for every chapter (e.g. when out of API quota).",
+        help="Skip the Gemini and OKF phases for every chapter (e.g. when out of API quota).",
     )
     parser.add_argument(
         "--chunk-size",
@@ -198,59 +314,18 @@ def main() -> None:
         help="Gemini model cascade strategy: 'quality' prefers highest-capability Flash models; "
         "'quota' prefers highest-rate-limit Flash-Lite models (default: quality).",
     )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=2,
+        help="Maximum concurrent chunk requests to Gemini API (default: 2).",
+    )
     args = parser.parse_args()
 
     if not args.pdf_path.is_file():
         sys.exit(f"Error: Master PDF not found: {args.pdf_path}")
 
-    base_dir = args.output if args.output else args.pdf_path.parent / "Extracted_Rulebook"
-    pdf_split_dir = base_dir / "PDF_Chapters"
-    md_out_dir = base_dir / "Markdown"
-    md_out_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1. Slice the PDF
-    try:
-        chapters = split_pdf_by_chapters(args.pdf_path, pdf_split_dir)
-    except ValueError as e:
-        sys.exit(f"[!] Error: {e}")
-
-    print("\n" + "=" * 50)
-    print(" PIPELINE EXECUTION STARTING")
-    print("=" * 50)
-
-    converter = LazyConverter()  # Docling models load once, shared across chapters
-    failures: list[tuple[str, str]] = []
-
-    for idx, chap in enumerate(chapters, 1):
-        print(f"\n[{idx}/{len(chapters)}] Processing: {chap.path.name}")
-        try:
-            final_md = process_chapter(
-                chap,
-                md_out_dir,
-                converter,
-                force=args.force,
-                docling_only=args.docling_only,
-                chunk_size=args.chunk_size,
-                gemini_strategy=args.gemini_strategy,
-            )
-            print(f"  [SUCCESS] {chap.path.name} -> {final_md.name}")
-        except Exception as e:  # noqa: BLE001 - keep going so one bad chapter doesn't stop the book
-            print(f"  [FAILED] {chap.path.name}: {e}", file=sys.stderr)
-            failures.append((chap.path.name, str(e)))
-
-    print("\n" + "=" * 50)
-    if failures:
-        print(f" FINISHED WITH {len(failures)} FAILED CHAPTER(S):")
-        for name, err in failures:
-            print(f"   - {name}: {err}")
-        print(" Re-run the same command to retry; completed work is cached.")
-    else:
-        print(" ALL CHAPTERS PROCESSED SUCCESSFULLY!")
-    print(f" Outputs saved to: {md_out_dir}")
-    print("=" * 50)
-
-    if failures:
-        sys.exit(1)
+    asyncio.run(run_pipeline_async(args))
 
 
 if __name__ == "__main__":

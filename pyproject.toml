@@ -20,7 +20,6 @@ test = [
 ttrpg-pipeline = "ttrpg_markdown_pipeline.orchestrator:main"
 ttrpg-docling = "ttrpg_markdown_pipeline.extractors.docling:main"
 ttrpg-gemini = "ttrpg_markdown_pipeline.extractors.gemini:main"
-ttrpg-merge = "ttrpg_markdown_pipeline.processors.merge:main"
 ttrpg-patch = "ttrpg_markdown_pipeline.processors.patch:main"
 ttrpg-glyphs = "ttrpg_markdown_pipeline.tools.inspect_glyphs:main"
 
