@@ -287,3 +287,106 @@ def test_shred_chapter_sourcebook_override_and_dedup(tmp_path: Path):
     # Verify content of attack was consolidated
     content = yaml.safe_load(attack_file.read_text(encoding="utf-8").split("---\n")[1])
     assert content["sourcebook"] == canonical_sourcebook
+
+
+def test_shred_adventure_node_and_lore(tmp_path: Path):
+    docling_file = tmp_path / "01-Part_1 - DOCLING.md"
+    docling_file.write_text("## Alethi Ambush\n\nArrows rain down on the caravan.", encoding="utf-8")
+
+    gemini_file = tmp_path / "01-Part_1 - GEMINI.md"
+    gemini_data = [
+        {
+            "schema_version": "1.0.0",
+            "sourcebook": "Stormlight Solo",
+            "type": "adventure_node",
+            "node_id": "A1",
+            "name": "Alethi Ambush",
+            "category": "Part 1",
+            "read_aloud": "Arrows rain down from the ridge.",
+            "body_text": "Parshendi attack the wagons.",
+            "skill_checks": [{"skill": "Athletics", "dc": 14, "success": "Take cover"}],
+            "choices": [{"option": "Charge", "target_node": "A2"}],
+        },
+        {
+            "schema_version": "1.0.0",
+            "sourcebook": "Stormlight Solo",
+            "type": "faction",
+            "name": "Ghostbloods",
+            "category": "Factions",
+            "key_themes": ["Intrigue"],
+            "adventure_hooks": ["Find the spy."],
+            "body_text": "A covert organization.",
+        },
+    ]
+    gemini_file.write_text(f"```json\n{json.dumps(gemini_data)}\n```", encoding="utf-8")
+
+    vault_dir = tmp_path / "okf_vault"
+    saved = shred_chapter(docling_file, gemini_file, vault_dir, default_sourcebook="Stormlight Solo")
+
+    assert len(saved) == 2
+    node_file = vault_dir / "stormlight_solo" / "adventure_nodes" / "a1_alethi_ambush.md"
+    faction_file = vault_dir / "stormlight_solo" / "factions" / "ghostbloods.md"
+
+    assert node_file.exists()
+    assert faction_file.exists()
+
+    node_text = node_file.read_text(encoding="utf-8")
+    assert "node_id: A1" in node_text
+    assert "### Read-Aloud" in node_text
+    assert "### Skill Checks" in node_text
+    assert "### Choices & Branches" in node_text
+
+
+def test_consolidate_adventure_nodes_and_lore():
+    chunk1 = [
+        {
+            "type": "adventure_node",
+            "node_id": "A1",
+            "name": "The Ambush",
+            "category": "Part 1",
+            "state_mutations": ["Resources -1"],
+            "choices": [{"option": "Fight", "target_node": "A2"}],
+            "body_text": "Short intro.",
+        },
+        {
+            "type": "lore",
+            "name": "Roshar",
+            "category": "Cosmology",
+            "key_themes": ["Highstorms"],
+            "adventure_hooks": ["Survive the storm."],
+            "body_text": "A world of stone.",
+        },
+    ]
+    chunk2 = [
+        {
+            "type": "adventure_node",
+            "node_id": "A1",
+            "name": "The Ambush Detailed",
+            "category": "Part 1",
+            "state_mutations": ["Attribute +1 Speed"],
+            "choices": [{"option": "Flee", "target_node": "A3"}],
+            "body_text": "A much longer and richer description of the ambush scene.",
+        },
+        {
+            "type": "lore",
+            "name": "Roshar",
+            "category": "Cosmology",
+            "key_themes": ["Spren"],
+            "adventure_hooks": ["Bond a spren."],
+            "body_text": "A world of stone and storm.",
+        },
+    ]
+
+    merged = consolidate_concepts(chunk1 + chunk2)
+    assert len(merged) == 2
+
+    merged_node = next(c for c in merged if c["type"] == "adventure_node")
+    assert "Resources -1" in merged_node["state_mutations"]
+    assert "Attribute +1 Speed" in merged_node["state_mutations"]
+    assert len(merged_node["choices"]) == 2
+    assert "much longer and richer" in merged_node["body_text"]
+
+    merged_lore = next(c for c in merged if c["type"] == "lore")
+    assert "Highstorms" in merged_lore["key_themes"]
+    assert "Spren" in merged_lore["key_themes"]
+    assert len(merged_lore["adventure_hooks"]) == 2

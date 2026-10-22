@@ -16,10 +16,12 @@ from typing import Any
 import yaml
 
 from ttrpg_markdown_pipeline.models import (
+    OKFAdventureNode,
     OKFAdversary,
     OKFArmor,
     OKFConcept,
     OKFItem,
+    OKFLoreEntry,
     OKFRule,
     OKFTalent,
     OKFWeapon,
@@ -192,6 +194,10 @@ def instantiate_okf_concept(item_dict: dict[str, Any], docling_body: str | None 
         return OKFItem(**merged_dict)
     if c_type == "adversary":
         return OKFAdversary(**merged_dict)
+    if c_type in ("lore", "faction", "location"):
+        return OKFLoreEntry(**merged_dict)
+    if c_type == "adventure_node":
+        return OKFAdventureNode(**merged_dict)
     return OKFRule(**merged_dict)
 
 
@@ -226,6 +232,15 @@ def parse_gemini_json_payload(gemini_raw_text: str) -> list[dict[str, Any]]:
     return combined_items
 
 
+TYPE_FOLDER_MAPPING = {
+    "adversary": "adversaries",
+    "lore": "lore",
+    "faction": "factions",
+    "location": "locations",
+    "adventure_node": "adventure_nodes",
+}
+
+
 def consolidate_concepts(concepts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Deduplicates and merges concept dictionaries sharing (type, slug).
 
@@ -239,7 +254,10 @@ def consolidate_concepts(concepts: list[dict[str, Any]]) -> list[dict[str, Any]]
             continue
 
         c_type = str(item.get("type", "rule")).lower()
-        slug = sanitize_slug(str(item["name"]))
+        if c_type == "adventure_node" and item.get("node_id"):
+            slug = sanitize_slug(str(item["node_id"]))
+        else:
+            slug = sanitize_slug(str(item["name"]))
         key = (c_type, slug)
 
         if key not in grouped:
@@ -259,12 +277,27 @@ def consolidate_concepts(concepts: list[dict[str, Any]]) -> list[dict[str, Any]]
                     str(existing.get("example_text", "")).strip()
                 ):
                     existing["example_text"] = val
-            elif field == "traits" and isinstance(val, list):
-                existing_traits = existing.get("traits") or []
-                if isinstance(existing_traits, list):
-                    existing["traits"] = list(dict.fromkeys(existing_traits + val))
+            elif field == "read_aloud":
+                if len(str(val).strip()) > len(str(existing.get("read_aloud", "")).strip()):
+                    existing["read_aloud"] = val
+            elif field in (
+                "traits",
+                "key_themes",
+                "adventure_hooks",
+                "skill_checks",
+                "state_mutations",
+                "choices",
+                "journal_prompts",
+            ) and isinstance(val, list):
+                existing_list = existing.get(field) or []
+                if isinstance(existing_list, list):
+                    merged_list = list(existing_list)
+                    for elem in val:
+                        if elem not in merged_list:
+                            merged_list.append(elem)
+                    existing[field] = merged_list
                 else:
-                    existing["traits"] = val
+                    existing[field] = val
             else:
                 if existing.get(field) is None or existing.get(field) == "":
                     existing[field] = val
@@ -299,7 +332,13 @@ def shred_chapter(
             item["sourcebook"] = "Cosmere RPG"
 
         name = str(item["name"])
-        slug = sanitize_slug(name)
+        c_type = str(item.get("type", "rule")).lower()
+        if c_type == "adventure_node" and item.get("node_id"):
+            node_id_slug = sanitize_slug(str(item["node_id"]))
+            name_slug = sanitize_slug(name)
+            slug = f"{node_id_slug}_{name_slug}" if name_slug != node_id_slug else node_id_slug
+        else:
+            slug = sanitize_slug(name)
 
         # Look up matching Docling text section
         matched_body = docling_sections.get(slug)
@@ -323,8 +362,7 @@ def shred_chapter(
                     break
 
         sourcebook_slug = sanitize_slug(str(item.get("sourcebook") or default_sourcebook))
-        c_type = str(item.get("type", "rule")).lower()
-        type_folder = "adversaries" if c_type == "adversary" else f"{c_type}s"
+        type_folder = TYPE_FOLDER_MAPPING.get(c_type, f"{c_type}s")
         target_dir = vault_dir / sourcebook_slug / type_folder
         target_dir.mkdir(parents=True, exist_ok=True)
 
