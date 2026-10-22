@@ -149,3 +149,14 @@ def test_process_chapter_docling_only_flag(tmp_path: Path):
         mock_extract_async.assert_not_called()
         mock_shred.assert_not_called()
         mock_patch.assert_called_once_with(final_md)
+
+
+def test_split_pdf_by_chapters_all_mechanics(sample_pdf_with_toc: Path, tmp_path: Path):
+    split_dir = tmp_path / "PDF_Chapters"
+    chapters = split_pdf_by_chapters(sample_pdf_with_toc, split_dir, all_mechanics=True)
+
+    assert len(chapters) == 3
+    # With all_mechanics=True, even Introduction should have mechanics=True
+    assert chapters[0].mechanics is True
+    assert chapters[1].mechanics is True
+    assert chapters[2].mechanics is True

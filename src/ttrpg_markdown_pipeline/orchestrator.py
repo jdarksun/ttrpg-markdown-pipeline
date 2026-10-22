@@ -37,7 +37,12 @@ def sanitize_filename(name: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
-def split_pdf_by_chapters(pdf_path: Path, output_dir: Path) -> list[Chapter]:
+def split_pdf_by_chapters(
+    pdf_path: Path,
+    output_dir: Path,
+    *,
+    all_mechanics: bool = False,
+) -> list[Chapter]:
     """Reads the TOC, splits the PDF into chapter files, and returns their metadata.
 
     Raises ValueError if the PDF has no usable Table of Contents.
@@ -88,7 +93,7 @@ def split_pdf_by_chapters(pdf_path: Path, output_dir: Path) -> list[Chapter]:
                 chap_doc.save(out_path)
                 chap_doc.close()
 
-            needs_mechanics = any(kw in clean_title.lower() for kw in MECHANICS_KEYWORDS)
+            needs_mechanics = all_mechanics or any(kw in clean_title.lower() for kw in MECHANICS_KEYWORDS)
             generated.append(Chapter(path=out_path, title=clean_title, mechanics=needs_mechanics))
     finally:
         doc.close()
@@ -205,11 +210,19 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     md_out_dir.mkdir(parents=True, exist_ok=True)
     vault_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Slice the PDF
-    try:
-        chapters = split_pdf_by_chapters(args.pdf_path, pdf_split_dir)
-    except ValueError as e:
-        sys.exit(f"[!] Error: {e}")
+    # 1. Slice or select document
+    if getattr(args, "no_split", False):
+        print(f"\n[Orchestrator] Processing {args.pdf_path.name} as a single document (--no-split)...")
+        chapters = [Chapter(path=args.pdf_path, title=args.pdf_path.stem, mechanics=True)]
+    else:
+        try:
+            chapters = split_pdf_by_chapters(
+                args.pdf_path,
+                pdf_split_dir,
+                all_mechanics=getattr(args, "all_mechanics", False),
+            )
+        except ValueError as e:
+            sys.exit(f"[!] Error: {e}")
 
     print("\n" + "=" * 50)
     print(" PIPELINE EXECUTION STARTING (OKF ARCHITECTURE)")
@@ -293,6 +306,16 @@ def main() -> None:
         "--force",
         action="store_true",
         help="Re-run Docling and Gemini extraction even if their outputs already exist.",
+    )
+    parser.add_argument(
+        "--no-split",
+        action="store_true",
+        help="Process the PDF as a single document without splitting into chapter PDFs.",
+    )
+    parser.add_argument(
+        "--all-mechanics",
+        action="store_true",
+        help="Extract OKF concepts for all chapters, ignoring keyword filtering.",
     )
     parser.add_argument(
         "--docling-only",
