@@ -107,6 +107,10 @@ UNIVERSAL_INLINE_FIXES = {
 
 def patch_cosmere_rules(text: str) -> str:
     """Post-processing regex cleanup specifically for Cosmere RPG Markdown output."""
+    from ttrpg_markdown_pipeline.processors.shredder import clean_extraction_artifacts
+
+    text = clean_extraction_artifacts(text)
+
     # 1. Introduction Action Economy definitions
     text = re.sub(r"Free Actions\s*\(\s*\)\.", "Free Actions ([Free Action]).", text)
     text = re.sub(r"Reactions\s*\(\s*\)\.", "Reactions ([Reaction]).", text)

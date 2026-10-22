@@ -7,6 +7,7 @@ atomic concept markdown files into a structured OKF vault.
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from pathlib import Path
@@ -63,17 +64,115 @@ def apply_inline_repairs(text: str) -> str:
     return patched
 
 
+def clean_extraction_artifacts(text: str) -> str:
+    """Cleans Docling extraction artifacts, publisher watermarks, stray OCR glyphs, and unescapes HTML."""
+    if not text:
+        return ""
+
+    # Unescape HTML entities (e.g. &amp; -> &, &lt; -> <)
+    cleaned = html.unescape(text)
+
+    # Strip Docling image comments
+    cleaned = re.sub(r"^[ \t]*<!--\s*image.*-->[ \t]*$\n?", "", cleaned, flags=re.MULTILINE | re.IGNORECASE)
+
+    # Strip publisher / DriveThruRPG watermarks
+    cleaned = re.sub(
+        r"Downloaded by [^\n\r]*(?:\r?\n[^\n\r]*)?Unauthorized distribution prohibited\.?",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"^.*Downloaded by .*$\n?", "", cleaned, flags=re.MULTILINE | re.IGNORECASE)
+    cleaned = re.sub(
+        r"^.*Unauthorized distribution prohibited\.?.*$\n?",
+        "",
+        cleaned,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+
+    # Strip standalone bullet and optional page number footers (e.g. '● 48', '●\n\n48', '• 12', or standalone '●')
+    cleaned = re.sub(
+        r"^[ \t]*[●•](?:[ \t]+|\r?\n[ \t]*)*(?:\d+)?[ \t]*$\n?",
+        "",
+        cleaned,
+        flags=re.MULTILINE,
+    )
+
+    # Strip stray single-letter OCR noise lines (e.g. 'M', 'V')
+    cleaned = re.sub(r"^[ \t]*[MV][ \t]*$\n?", "", cleaned, flags=re.MULTILINE)
+
+    # Collapse 3+ consecutive newlines
+    cleaned = re.sub(r"(\r?\n\s*){3,}", "\n\n", cleaned)
+
+    return cleaned.strip()
+
+
+def split_mechanics_and_examples(text: str) -> tuple[str, str | None]:
+    """Splits a body of rules text into pure mechanical rules and play examples / dialogue."""
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    if not paragraphs:
+        return "", None
+
+    mechanics_paras: list[str] = []
+    example_paras: list[str] = []
+
+    speaker_pattern = re.compile(r"^(?:[A-Z][a-zA-Z\s]{1,15}|GM|DM):\s+")
+    example_heading_pattern = re.compile(
+        r"^(?:#{1,4}\s*)?(?:\*\*|\*)?Example(?:\s+(?:Play|of\s+Play))?(?:\*\*|\*)?:?",
+        re.IGNORECASE,
+    )
+    heading_pattern = re.compile(r"^#{1,4}\s+")
+
+    in_example_block = False
+
+    for para in paragraphs:
+        lines = [line.strip() for line in para.splitlines() if line.strip()]
+        if not lines:
+            continue
+
+        if example_heading_pattern.match(lines[0]):
+            in_example_block = True
+            example_paras.append(para)
+        elif in_example_block:
+            if heading_pattern.match(lines[0]) and not example_heading_pattern.match(lines[0]):
+                in_example_block = False
+                mechanics_paras.append(para)
+            else:
+                example_paras.append(para)
+        elif speaker_pattern.match(lines[0]):
+            example_paras.append(para)
+        else:
+            mechanics_paras.append(para)
+
+    if not mechanics_paras:
+        return text.strip(), None
+
+    mechanics_text = "\n\n".join(mechanics_paras).strip()
+    example_text = "\n\n".join(example_paras).strip() if example_paras else None
+    return mechanics_text, example_text
+
+
 def instantiate_okf_concept(item_dict: dict[str, Any], docling_body: str | None = None) -> OKFConcept:
     """Instantiates the specialized OKF Pydantic model according to 'type'."""
     c_type = str(item_dict.get("type", "rule")).lower()
     merged_dict = dict(item_dict)
 
+    raw_body = ""
     if docling_body and docling_body.strip():
         # Prefer Docling verbatim layout text if matched, repaired with inline glyphs
-        merged_dict["body_text"] = apply_inline_repairs(docling_body)
+        raw_body = clean_extraction_artifacts(apply_inline_repairs(docling_body))
     elif "body_text" in merged_dict and merged_dict["body_text"]:
         # Fallback to Gemini body text repaired with inline glyphs
-        merged_dict["body_text"] = apply_inline_repairs(str(merged_dict["body_text"]))
+        raw_body = clean_extraction_artifacts(apply_inline_repairs(str(merged_dict["body_text"])))
+
+    if raw_body:
+        mech_text, ex_text = split_mechanics_and_examples(raw_body)
+        merged_dict["body_text"] = mech_text
+        if ex_text and not merged_dict.get("example_text"):
+            merged_dict["example_text"] = ex_text
+
+    if "example_text" in merged_dict and merged_dict["example_text"]:
+        merged_dict["example_text"] = clean_extraction_artifacts(str(merged_dict["example_text"]))
 
     if c_type == "talent":
         return OKFTalent(**merged_dict)
@@ -126,7 +225,7 @@ def shred_chapter(
     default_sourcebook: str = "Cosmere RPG",
 ) -> list[Path]:
     """Shreds a single chapter's Docling & Gemini output into atomic OKF Markdown files in vault_dir."""
-    docling_text = docling_md_path.read_text(encoding="utf-8")
+    docling_text = clean_extraction_artifacts(docling_md_path.read_text(encoding="utf-8"))
     gemini_text = gemini_output_path.read_text(encoding="utf-8")
 
     docling_sections = split_docling_by_headers(docling_text)

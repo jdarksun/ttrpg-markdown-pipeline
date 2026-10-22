@@ -6,10 +6,12 @@ from pathlib import Path
 import yaml
 
 from ttrpg_markdown_pipeline.processors.shredder import (
+    clean_extraction_artifacts,
     parse_gemini_json_payload,
     sanitize_slug,
     shred_chapter,
     split_docling_by_headers,
+    split_mechanics_and_examples,
 )
 
 
@@ -105,3 +107,67 @@ def test_shred_chapter(tmp_path: Path):
     data = yaml.safe_load(parts[1])
     assert data["type"] == "weapon"
     assert data["damage"] == "1d6 physical"
+
+
+def test_clean_extraction_artifacts():
+    sample = (
+        "Salt &amp; Pepper &lt;Special&gt;\n\n"
+        "<!-- image -->\n\n"
+        "Downloaded by Jane Doe on 1/1/2026 . Unauthorized distribution prohibited.\n\n"
+        "●\n\n"
+        "48\n\n"
+        "M\n\n"
+        "V\n\n"
+        "<!--image-->\n\n"
+        "• 52\n\n"
+        "Actual rules content remains intact."
+    )
+    cleaned = clean_extraction_artifacts(sample)
+
+    assert "Salt & Pepper <Special>" in cleaned
+    assert "<!-- image -->" not in cleaned
+    assert "<!--image-->" not in cleaned
+    assert "Downloaded by" not in cleaned
+    assert "Unauthorized distribution" not in cleaned
+    assert "●" not in cleaned
+    assert "•" not in cleaned
+    assert "\nM\n" not in cleaned
+    assert "\n\nV\n\n" not in cleaned
+    assert "Actual rules content remains intact." in cleaned
+    assert "\n\n\n" not in cleaned
+
+
+def test_split_mechanics_and_examples_speaker_dialogue():
+    text = (
+        "When taking the Attack action, roll 1d20 plus your attack modifier.\n\n"
+        "Joe: That's a Near Miss…\n\n"
+        "Paige: Can one of you help out?\n\n"
+        "Ben: I can."
+    )
+    mech, example = split_mechanics_and_examples(text)
+    assert mech == "When taking the Attack action, roll 1d20 plus your attack modifier."
+    assert example is not None
+    assert "Joe: That's a Near Miss…" in example
+    assert "Paige: Can one of you help out?" in example
+    assert "Ben: I can." in example
+
+
+def test_split_mechanics_and_examples_heading_block():
+    text = (
+        "You can spend 1 focus to reroll a failed test.\n\n"
+        "### Example Play\n\n"
+        "Koda wants to reroll a failed Stealth test.\n\n"
+        "He spends 1 focus and succeeds."
+    )
+    mech, example = split_mechanics_and_examples(text)
+    assert mech == "You can spend 1 focus to reroll a failed test."
+    assert example is not None
+    assert "### Example Play" in example
+    assert "Koda wants to reroll" in example
+
+
+def test_split_mechanics_and_examples_no_example():
+    text = "This rule has only pure mechanics without any play examples."
+    mech, example = split_mechanics_and_examples(text)
+    assert mech == text
+    assert example is None
