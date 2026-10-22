@@ -72,4 +72,3 @@ def test_cross_link_vault(tmp_path: Path):
 
     talent_content = talent_file.read_text(encoding="utf-8")
     assert "[Disengage](../rules/disengage.md)" in talent_content
-

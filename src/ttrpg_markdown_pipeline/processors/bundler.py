@@ -68,4 +68,3 @@ def bundle_vault(vault_dir: Path, output_dir: Path) -> list[Path]:
                 generated_bundles.append(bundle_file)
 
     return generated_bundles
-

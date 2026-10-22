@@ -129,4 +129,3 @@ def cross_link_vault(vault_dir: Path) -> int:
             modified_count += 1
 
     return modified_count
-

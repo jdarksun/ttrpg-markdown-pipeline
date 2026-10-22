@@ -58,4 +58,3 @@ def test_bundle_vault(tmp_path: Path):
     bundle_names = {b.name for b in bundles}
     assert "Mistborn_All_Talents.md" in bundle_names
     assert "Mistborn_All_Weapons.md" in bundle_names
-
