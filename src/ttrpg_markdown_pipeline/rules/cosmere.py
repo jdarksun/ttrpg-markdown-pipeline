@@ -5,12 +5,38 @@ import re
 # Chapters containing these words in their title trigger the Full Pipeline (Docling + Gemini + Merge)
 MECHANICS_KEYWORDS = [
     "path",  # Heroic Paths, Metalborn Paths
-    "art",  # Metallic Arts
+    "arts",  # Metallic Arts
     "combat",  # Combat
     "item",  # Items & Equipment
     "adversar",  # Adversaries / Bestiary
     "equipment",  # Equipment & Gear
     "expertise",  # Cultural & Utility Expertises
+]
+
+# Chapters containing these words describe worldbuilding, geography, culture, and factions
+LORE_KEYWORDS = [
+    "world",
+    "lore",
+    "history",
+    "faction",
+    "culture",
+    "setting",
+    "gazetteer",
+    "atlas",
+    "cosmology",
+    "organization",
+]
+
+# Chapters or section titles describing modular/procedural adventure sequences
+ADVENTURE_KEYWORDS = [
+    "part ",
+    "scene",
+    "act ",
+    "adventure",
+    "encounter",
+    "episode",
+    "solo",
+    "chapter",
 ]
 
 DEFAULT_PROMPT = """
@@ -34,6 +60,62 @@ CRITICAL INSTRUCTIONS:
      * For "adversary": "tier", "role"
    - "body_text": The complete rules description and mechanical effects. Do NOT summarize or omit rules nuances.
    - "example_text": Any gameplay dialogue transcripts, play examples, or in-character banter illustrating the rule (or null if none). Keep pure mechanics in body_text.
+
+Strict Icon Translation Rules for body_text & activation:
+- Single filled diamond -> `[1 Action]`
+- Two diamonds -> `[2 Actions]`
+- Three diamonds -> `[3 Actions]`
+- Clockwise loop / circular arrow -> `[Reaction]`
+- Open / winged diamond -> `[Free Action]`
+- Star icon (★) or badge -> `[Special Activation]`
+- Figure-8 / infinity symbol -> `[Passive]`
+- Crossed keys / sunburst icon -> `[Opportunity]`
+- Spiked skull / complication icon -> `[Complication]`
+"""  # noqa: E501
+
+LORE_PROMPT = """
+You are a precision TTRPG worldbuilding and narrative lore extraction engine.
+Analyze this Cosmere RPG setting/lore chapter and extract all narrative entities, factions, historical eras, cultural overviews, and significant locations into a STRICT JSON list of objects matching the Open Knowledge Format (OKF) schema.
+
+CRITICAL INSTRUCTIONS:
+1. Output ONLY a valid JSON array of objects. Do not wrap with prose, introduction, or conversational text. Fenced markdown json (```json ... ```) is acceptable.
+2. For each extracted lore concept, output an object with:
+   - "schema_version": "1.0.0"
+   - "sourcebook": The sourcebook or publication identifier (e.g. "Stormlight World Guide", "Mistborn World Guide")
+   - "type": One of "lore" (general history, cosmology, or concept), "faction" (organization, order, or political group), or "location" (city, realm, region, or landmark)
+   - "name": Canonical name of the entity (e.g. "Ghostbloods", "Shattered Plains", "The Desolations")
+   - "category": Parent realm, region, or topic (e.g. "Roshar Factions", "Alethkar Geography", "Historical Eras")
+   - "key_themes": A list of 2-5 thematic tags, motifs, or mood keywords (e.g. ["Cosmere intrigue", "Shadow war", "Survival"])
+   - "adventure_hooks": A list of 2-4 concrete plot hooks, rumors, or encounter seeds for game masters to use in adventure design
+   - "body_text": Comprehensive, rich narrative description, history, philosophy, or geography. Preserve lore depth and nuanced details.
+   - "example_text": Any in-world quotes, epigraphs, excerpts, or flavor transcripts illustrating the entity (or null if none).
+"""  # noqa: E501
+
+ADVENTURE_PROMPT = """
+You are a precision TTRPG adventure module parser and rules extraction engine.
+Analyze this adventure module text and extract:
+1. Every distinct scene, branching encounter, or decision node into an "adventure_node" object.
+2. Any mechanical statblocks, adversaries, unique items, weapons, armor, or special rules into their respective OKF objects.
+
+CRITICAL INSTRUCTIONS:
+1. Output ONLY a valid JSON array of objects. Do not wrap with prose, introduction, or conversational text. Fenced markdown json (```json ... ```) is acceptable.
+2. For "adventure_node" objects:
+   - "schema_version": "1.0.0"
+   - "sourcebook": The adventure module title (e.g. "The First Step: Solo Edition", "Stonewalkers")
+   - "type": "adventure_node"
+   - "name": Descriptive name of the scene or encounter (e.g. "Alethi Ambush Opening", "Chasm Crossing")
+   - "category": Scene group, act, or chapter (e.g. "Part 1", "Act 2")
+   - "node_id": The alphanumeric identifier or node key (e.g. "A1", "A2", "B4", "Scene 1")
+   - "read_aloud": Any boxed text, italics, or narrative meant to be read directly to players (or null if none)
+   - "body_text": The GM-facing scene description, tactical setup, hazard details, or narrative resolution
+   - "skill_checks": List of objects with {"skill": str, "dc": int | str | null, "success": str | null, "failure": str | null}
+   - "state_mutations": List of string modifications to character/party state (e.g. ["Resources -1", "Attribute +1 Speed", "Exhausted [-1]"])
+   - "choices": List of branching choices {"option": str, "target_node": str | null, "condition": str | null}
+   - "journal_prompts": List of roleplay questions or solo journaling prompts (or empty list if none)
+   - "example_text": null
+
+3. For mechanical objects embedded in the adventure (such as adversary encounters, loot, or mechanics):
+   - Use "type": "adversary", "weapon", "armor", "item", "rule", or "talent" as appropriate, following standard OKF fields.
 
 Strict Icon Translation Rules for body_text & activation:
 - Single filled diamond -> `[1 Action]`
