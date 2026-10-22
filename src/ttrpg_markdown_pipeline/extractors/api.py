@@ -35,7 +35,7 @@ async def generate_with_fallback_async(
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] Attempting async generation with {model}...")
 
-        for attempt in range(1, 4):
+        for attempt in range(1, 6):
             try:
                 response = await client.aio.models.generate_content(model=model, contents=contents)
                 if response.text:
@@ -55,12 +55,12 @@ async def generate_with_fallback_async(
                     _EXHAUSTED_MODELS.add(model)
                     break
 
-                if attempt == 3:
-                    print(f"[{ts}] [!] {model} unavailable after 3 attempts ({e.code}: {e.message[:80]}). Cascading to next model...")
+                if attempt == 5:
+                    print(f"[{ts}] [!] {model} unavailable after 5 attempts ({e.code}: {e.message[:80]}). Cascading to next model...")
                     break
 
-                backoff = attempt * 10 if e.code == 429 else attempt * 4
-                print(f"[{ts}] [!] Transient {model} error ({e.code}: {e.message[:80]}). Retrying in {backoff}s (attempt {attempt}/3)...")
+                backoff = min(attempt * 12 if e.code in (429, 503) else attempt * 5, 60)
+                print(f"[{ts}] [!] Transient {model} error ({e.code}: {e.message[:80]}). Retrying in {backoff}s (attempt {attempt}/5)...")
                 await asyncio.sleep(backoff)
 
     raise RuntimeError("All models in the desirability path failed or exhausted quota.")
