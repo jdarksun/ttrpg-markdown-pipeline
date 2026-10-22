@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -97,8 +98,19 @@ async def _process_chunk_async(
             chunk_doc.close()
             doc.close()
 
-            # Upload file via modern SDK client.files.upload (sync/async run in thread if sync)
-            uploaded_file = await asyncio.to_thread(client.files.upload, file=str(temp_chunk_path))
+            # Upload file via modern SDK client.files.upload with retry for transient 503/network errors
+            uploaded_file = None
+            for upload_attempt in range(1, 4):
+                try:
+                    uploaded_file = await asyncio.to_thread(client.files.upload, file=str(temp_chunk_path))
+                    break
+                except Exception as upload_err:
+                    if upload_attempt == 3:
+                        raise
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    backoff = upload_attempt * 3
+                    print(f"[{ts}] {label} Upload transient error ({upload_err}). Retrying in {backoff}s...")
+                    await asyncio.sleep(backoff)
 
             try:
                 text, model_used = await generate_with_fallback_async(
@@ -111,8 +123,9 @@ async def _process_chunk_async(
                 print(f"[{ts}] {label} Successfully processed via {model_used}.")
                 return text
             finally:
-                if uploaded_file.name:
-                    await asyncio.to_thread(client.files.delete, name=uploaded_file.name)
+                if uploaded_file and uploaded_file.name:
+                    with contextlib.suppress(Exception):
+                        await asyncio.to_thread(client.files.delete, name=uploaded_file.name)
         finally:
             if temp_chunk_path.exists():
                 temp_chunk_path.unlink()
