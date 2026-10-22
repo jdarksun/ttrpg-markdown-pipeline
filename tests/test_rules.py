@@ -58,17 +58,22 @@ def test_patch_cosmere_rules():
 
 
 def test_mechanics_keyword_matching():
+    assert any(kw in "02-Chapter 2 - Origins".lower() for kw in MECHANICS_KEYWORDS)
+    assert any(kw in "03-Chapter 3 - Character Statistics".lower() for kw in MECHANICS_KEYWORDS)
     assert any(kw in "04-Heroic_Paths".lower() for kw in MECHANICS_KEYWORDS)
+    assert any(kw in "06-Chapter 6 - Surges".lower() for kw in MECHANICS_KEYWORDS)
+    assert any(kw in "09-Chapter 9 - Adventuring".lower() for kw in MECHANICS_KEYWORDS)
     assert any(kw in "Combat & Action Economy".lower() for kw in MECHANICS_KEYWORDS)
     assert any(kw in "Metallic Arts".lower() for kw in MECHANICS_KEYWORDS)
     assert any(kw in "Adversaries".lower() for kw in MECHANICS_KEYWORDS)
-    assert any(kw in "06-Chapter 6 - Surges".lower() for kw in MECHANICS_KEYWORDS)
     assert any(kw in "11-Chapter 11 - Conversations".lower() for kw in MECHANICS_KEYWORDS)
     assert any(kw in "12-Chapter 12 - Endeavors".lower() for kw in MECHANICS_KEYWORDS)
     assert any(kw in "17-Appendix - Animal Companions".lower() for kw in MECHANICS_KEYWORDS)
     assert not any(kw in "World of Scadrial Overview".lower() for kw in MECHANICS_KEYWORDS)
     # Part does not trigger mechanics
     assert not any(kw in "01-Part 1 - Alethi Ambush".lower() for kw in MECHANICS_KEYWORDS)
+    # Generic chapter doesn't trigger adventure
+    assert not any(kw in "01-Chapter 1 - Character Creation".lower() for kw in ADVENTURE_KEYWORDS)
 
 
 def test_lore_and_adventure_keywords_and_prompts():

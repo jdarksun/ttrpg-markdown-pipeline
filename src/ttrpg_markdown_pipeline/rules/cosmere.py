@@ -4,17 +4,45 @@ import re
 
 # Chapters containing these words in their title trigger the Full Pipeline (Docling + Gemini + Merge)
 MECHANICS_KEYWORDS = [
-    "path",  # Heroic Paths, Metalborn Paths
-    "arts",  # Metallic Arts
-    "combat",  # Combat
-    "item",  # Items & Equipment
-    "adversar",  # Adversaries / Bestiary
-    "equipment",  # Equipment & Gear
-    "expertise",  # Cultural & Utility Expertises
+    # Paths, Classes, and Features
+    "path",  # Heroic Paths, Radiant Paths, Metalborn Paths
+    "class",  # Character Classes
+    "feat",  # Feats & Features
+    "arts",  # Metallic Arts, Martial Arts
     "surge",  # Surges & Surgebinding
+    "power",  # Powers & Psionics
+    "spell",  # Spells & Spellcasting
+    # Combat, Actions, and Encounters
+    "combat",  # Combat & Action Economy
+    "action",  # Actions & Reactions
     "endeavor",  # Endeavors
     "conversation",  # Conversations
+    # Equipment, Items, and Gear
+    "item",  # Items & Equipment
+    "equipment",  # Equipment & Gear
+    "weapon",  # Weapons
+    "armor",  # Armor
+    "gear",  # Adventuring Gear
+    # Adversaries and Creatures
+    "adversar",  # Adversaries
+    "bestiary",  # Bestiary
+    "monster",  # Monsters
     "companion",  # Animal Companions
+    # Characters, Origins, and Ancestries
+    "origin",  # Origins & Cultures
+    "ancestr",  # Ancestries & Heritages
+    "heritage",  # Heritages
+    "species",  # Species
+    "race",  # Races
+    "expertise",  # Cultural & Utility Expertises
+    # Core Statistics and Rules
+    "statistic",  # Character Statistics
+    "attribute",  # Attributes
+    "skill",  # Skills
+    "rule",  # Core Rules
+    "adventuring",  # Adventuring & Environmental Rules
+    "condition",  # Conditions & Afflictions
+    "hazard",  # Environmental Hazards
 ]
 
 # Chapters containing these words describe worldbuilding, geography, culture, and factions
@@ -36,11 +64,10 @@ ADVENTURE_KEYWORDS = [
     "part ",
     "scene",
     "act ",
-    "adventure",
     "encounter",
     "episode",
     "solo",
-    "chapter",
+    "adventure module",
 ]
 
 DEFAULT_PROMPT = """
