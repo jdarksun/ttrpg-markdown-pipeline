@@ -38,6 +38,7 @@ def test_chunk_file_for(tmp_path: Path):
 
 
 def test_generate_with_fallback_success():
+    _EXHAUSTED_MODELS.clear()
     client = MagicMock()
     mock_resp = MagicMock()
     mock_resp.text = "Generated markdown content"
