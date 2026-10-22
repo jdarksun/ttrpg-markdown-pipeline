@@ -61,6 +61,10 @@ ttrpg-pipeline "path/to/rulebook.pdf" [OPTIONS]
 | `-o`, `--output <DIR>` | Custom root output directory (defaults to `<pdf_dir>/Extracted_Rulebook`). |
 | `-s`, `--sourcebook <NAME>` | Sourcebook name for OKF concept namespacing (default: `Cosmere RPG`). |
 | `-f`, `--force` | Force re-extraction and overwrite existing cached chunks and outputs. |
+| `--no-split` | Process the PDF as a single document without slicing into chapter files. |
+| `--all-mechanics` | Extract OKF concepts for all chapters, bypassing keyword routing. |
+| `--include-lore` | Extract worldbuilding, factions, and lore chapters into `OKFLoreEntry` concepts (`lore/`, `factions/`, `locations/`). |
+| `--adventure-mode` | Parse interactive adventure scenes into state-machine `OKFAdventureNode` concepts and compile a GM Campaign Guide. |
 | `--docling-only` | Bypass Gemini Vision and OKF shredding (useful if offline or out of quota). |
 | `--chunk-size <INT>` | Number of pages per Gemini Vision batch (default: `8`). |
 | `--strategy {quality,quota}` | Model cascade strategy: `quality` (Flash) or `quota` (Flash-Lite). |
@@ -68,11 +72,15 @@ ttrpg-pipeline "path/to/rulebook.pdf" [OPTIONS]
 
 ### How the Orchestrator Routes Chapters
 
-The orchestrator inspects each chapter title in the Table of Contents:
-- **Mechanics Chapters** (containing keywords like `path`, `art`, `combat`, `item`, `adversar`):
-  Runs Docling $\rightarrow$ Async Gemini Vision $\rightarrow$ OKF Shredder $\rightarrow$ Cross-Linker $\rightarrow$ Bundler.
-- **Narrative / Lore Chapters**:
-  Runs Docling $\rightarrow$ Glyph Patch. Output: `<Chapter> - DOCLING.md`.
+The orchestrator inspects each chapter title in the Table of Contents and routes it dynamically:
+- **Mechanics Chapters** (containing keywords like `path`, `arts`, `combat`, `item`, `adversar`, `equipment`, `expertise`):
+  Runs Docling $\rightarrow$ Async Gemini Vision (`DEFAULT_PROMPT`) $\rightarrow$ OKF Shredder $\rightarrow$ Cross-Linker $\rightarrow$ Category Bundler.
+- **Adventure Modules / Encounters** (activated with `--adventure-mode` or titles containing `part `, `scene`, `act `, `adventure`):
+  Runs Docling $\rightarrow$ Async Gemini Vision (`ADVENTURE_PROMPT`) $\rightarrow$ Shreds into state-machine `adventure_nodes/` $\rightarrow$ Compiles `<Sourcebook>_GM_Campaign_Guide.md` with GM referee protocol.
+- **Worldbuilding & Lore Chapters** (activated with `--include-lore` or titles containing `world`, `lore`, `history`, `faction`, `setting`):
+  Runs Docling $\rightarrow$ Async Gemini Vision (`LORE_PROMPT`) $\rightarrow$ Shreds into modular `lore/`, `factions/`, and `locations/` with `key_themes` and `adventure_hooks`.
+- **Narrative Fallback**:
+  Runs Docling $\rightarrow$ Universal Glyph Patch $\rightarrow$ `<Chapter> - DOCLING.md`.
 
 ---
 
@@ -119,10 +127,11 @@ ttrpg-glyphs "rulebook.pdf" --search "Actions ("
 
 ---
 
-## OKF Concept Structure
+## OKF Concept Structures
 
-Atomic concept markdown files in `okf_vault/` feature structured YAML frontmatter:
+Atomic concept files in `okf_vault/` feature structured YAML frontmatter and clean semantic Markdown sections:
 
+### 1. Mechanical Concepts (`rules/`, `talents/`, `weapons/`, `armors/`, `adversaries/`)
 ```markdown
 ---
 schema_version: 1.0.0
@@ -134,8 +143,102 @@ prerequisites: Steel 2+
 activation: '[2 Actions]'
 ---
 
+### Mechanics
+
 You create a protective bubble of repelling force around yourself. Any incoming metal projectiles...
+
+### Example Play
+
+Joe: I use my reaction to flare steel as the crossbow bolt approaches.
 ```
+
+### 2. Worldbuilding & Lore (`lore/`, `factions/`, `locations/`)
+Extracted when `--include-lore` is enabled:
+```markdown
+---
+schema_version: 1.0.0
+type: faction
+sourcebook: Stormlight World Guide
+name: Ghostbloods
+category: Roshar Organizations
+key_themes:
+- Cosmere intrigue
+- Shadow war
+- Survival at any cost
+adventure_hooks:
+- A contact disappears leaving behind a silver coin.
+- A warehouse contains unrefined gemstones from another world.
+---
+
+### Lore & Worldbuilding
+
+An enigmatic organization originating from Scadrial seeking Investiture across the Cosmere...
+
+### Adventure Hooks
+
+- A contact disappears leaving behind a silver coin.
+- A warehouse contains unrefined gemstones from another world.
+```
+
+### 3. Interactive Adventure Nodes (`adventure_nodes/`)
+Extracted when `--adventure-mode` is enabled to build an interactive state-machine graph:
+```markdown
+---
+schema_version: 1.0.0
+type: adventure_node
+sourcebook: The First Step: Solo Edition
+module_name: The First Step
+node_id: A1
+name: Alethi Ambush Opening
+category: Part 1
+state_mutations:
+- Resources -1
+- Condition: Alert
+skill_checks:
+- skill: Athletics
+  dc: 14
+  success: Reach cover unharmed
+  failure: Take 4 keen damage
+choices:
+- option: Charge the archers
+  target_node: A2
+- option: Protect the wagon
+  target_node: A3
+  condition: Requires shield
+---
+
+### Read-Aloud
+
+> The sound of thunder shakes the canyon as arrows rain down from above.
+
+### Scene & Mechanics
+
+Parshendi skirmishers ambush the caravan flanks. Crawlers must react immediately...
+
+### Skill Checks
+
+- **Athletics** (DC 14): Success -> Reach cover unharmed; Failure -> Take 4 keen damage
+
+### Choices & Branches
+
+- Charge the archers -> Go to **A2**
+- Protect the wagon *(Requires shield)* -> Go to **A3**
+```
+
+---
+
+## NotebookLM & GM Campaign Bundles
+
+When running the bundler (`bundler.py`), the pipeline compiles Markdown files into `bundles/`:
+
+1. **Category Compendiums (`<Sourcebook>_All_<Category>.md`):**
+   - e.g. `Cosmere_Rpg_All_Rules.md`, `Cosmere_Rpg_All_Talents.md`, `Cosmere_Rpg_All_Adversaries.md`.
+   - Formatted with explicit ATX headings (`## <Name>`) and fenced YAML metadata blocks, eliminating CommonMark Setext collisions in NotebookLM.
+2. **Interactive GM Campaign Guides (`<Sourcebook>_GM_Campaign_Guide.md`):**
+   - Automatically created whenever an `adventure_nodes/` directory is present.
+   - Contains a **Solo/GM Referee System Instruction Preface** that instructs Gemini/NotebookLM how to step through nodes one by one, read boxed text verbatim, adjudicate skill checks, track state mutations (Attributes, Resources, Conditions), and pause for player input.
+   - Preserves natural alphanumeric ordering (`A1`, `A2`, ..., `A9`, `A10`, `B1`).
+   - Appends an **Inline Module Compendium** containing all adversaries, weapons, armor, and items referenced in the adventure for standalone execution.
 
 ---
 
