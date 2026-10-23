@@ -424,3 +424,15 @@ def test_instantiate_okf_concept_prefers_gemini_body_over_docling():
     assert "Use [1 Action] to mold stone" in concept.body_text
     assert "ILLUSTRATOR CREDIT" not in concept.body_text
     assert "Chapter 6: Powers" not in concept.body_text
+
+
+def test_parse_gemini_json_payload_handles_truncated_chunk_without_poisoning_next_chunk():
+    raw_multi_chunk = (
+        '```json\n[\n  {"name": "Step 1: Origins", "type": "rule"},\n'
+        '  {"name": "Step 3: Attributes", "body_text": "Truncated mid-string\n\n---\n\n'
+        '```json\n[\n  {"name": "Step 4: Skills", "type": "rule"}\n]\n```'
+    )
+    items = parse_gemini_json_payload(raw_multi_chunk)
+    names = [item["name"] for item in items]
+    assert "Step 1: Origins" in names
+    assert "Step 4: Skills" in names

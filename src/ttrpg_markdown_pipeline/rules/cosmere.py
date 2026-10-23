@@ -92,7 +92,7 @@ ADVENTURE_KEYWORDS = [
 
 UNIFIED_PROMPT = """
 You are a precision TTRPG rules and worldbuilding extraction engine.
-Analyze this TTRPG section and extract all mechanical concepts (talents, actions, items, weapons, armor, adversaries, rules, GM adjudication procedures) AND any distinct worldbuilding entities (cultures, factions, historical eras, locations, lore) into a STRICT JSON list of objects matching the Open Knowledge Format (OKF) schema.
+Analyze this TTRPG section and extract all mechanical concepts (talents, actions, items, weapons, armor, adversaries, rules, character creation/advancement procedures, GM adjudication procedures) AND any distinct worldbuilding entities (cultures, factions, historical eras, locations, lore) into a STRICT JSON list of objects matching the Open Knowledge Format (OKF) schema.
 
 CRITICAL INSTRUCTIONS:
 1. Output ONLY a valid JSON array of objects. Do not wrap with prose, introduction, or conversational text. Fenced markdown json (```json ... ```) is acceptable.
@@ -100,18 +100,20 @@ CRITICAL INSTRUCTIONS:
    - "schema_version": "1.0.0"
    - "sourcebook": The sourcebook or publication identifier (e.g. "Mistborn World Guide", "Stormlight RPG")
    - "type": One of "talent", "weapon", "armor", "item", "rule", "adversary", "lore", "faction", or "location"
-   - "name": Canonical name of the concept or entity (e.g. "Pewterarm Weaponcraft", "Longsword", "Disengage", "Ghostbloods")
-   - "category": Parent tree, group, culture, or section (e.g. "Pewter Allomancy", "Light Weaponry", "Combat Actions", "Roshar Factions")
+   - "name": Canonical name of the concept or entity (e.g. "Pewterarm Weaponcraft", "Longsword", "Disengage", "Step 3: Attributes", "Ghostbloods")
+   - "category": Parent tree, group, culture, or section (e.g. "Pewter Allomancy", "Light Weaponry", "Combat Actions", "Character Creation", "Roshar Factions")
    - Concept-specific fields:
      * For "talent": "prerequisites" (string or null) and "activation" (standardized: "[1 Action]", "[2 Actions]", "[3 Actions]", "[Reaction]", "[Free Action]", "[Special Activation]", or "[Passive]")
      * For "weapon": "damage", "range", "traits" (list of strings), "cost"
      * For "armor": "deflect", "traits" (list of strings), "cost"
      * For "item": "cost", "weight"
-     * For "rule": "action_cost" (standardized activation), "trigger"
+     * For "rule": "action_cost" (standardized activation, or null for passive/procedural rules), "trigger" (string or null)
      * For "adversary": "tier", "role"
      * For "lore", "faction", or "location": "key_themes" (list of 2-5 thematic tags) and "adventure_hooks" (list of 2-4 plot hooks or encounter seeds)
-   - "body_text": The complete, verbatim rules description, stat block, or lore entry. Do NOT summarize, abbreviate, or omit nuances. Exclude page footers and artist credits.
-   - "example_text": Any gameplay dialogue transcripts, play examples, or in-world quotes/epigraphs illustrating the concept (or null if none). Keep all mechanical stats and rules in body_text.
+   - "body_text": The complete, verbatim rules description, step-by-step procedure, stat block, or lore entry. Include any reference or progression tables formatted as Markdown tables inside body_text. Do NOT summarize, abbreviate, or omit nuances, numbers, or allocation limits. Exclude page footers and artist credits.
+   - "example_text": Any gameplay dialogue transcripts, play examples, or in-world quotes/epigraphs illustrating the concept (or null if none). Keep all mechanical stats, formulas, and rules in body_text.
+3. PROCEDURAL RULES & TABLES: Every procedural section, numbered creation/advancement step (e.g. "Character Creation Steps", "Step 1: Origins", "Step 2: Starting Path", "Step 3: Attributes", "Step 4: Skills and Expertises", "Step 5: Talents", "Step 6: Equipment", "Step 7: Story", "Step 8: Final Calculations", "Character Advancement", "Gaining a Level"), and core subsystem rule MUST be extracted as a `"type": "rule"` object with its complete verbatim instructions and Markdown tables in `body_text`.
+4. IGNORE SAMPLE CHARACTER SHEETS & PREVIEW STUBS: Do NOT extract individual talents, weapons, or armor shown on filled-in example character sheet illustrations or 1-line "at a glance" summary tables as standalone `"talent"`, `"weapon"`, or `"armor"` objects (instead, keep summary tables inside the parent rule's `body_text`).
 
 Strict Icon Translation Rules for body_text & activation:
 - Single filled diamond -> `[1 Action]`

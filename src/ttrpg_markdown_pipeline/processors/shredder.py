@@ -280,34 +280,67 @@ def instantiate_okf_concept(item_dict: dict[str, Any], docling_body: str | None 
     return OKFRule(**merged_dict)
 
 
-def parse_gemini_json_payload(gemini_raw_text: str) -> list[dict[str, Any]]:
-    """Extracts a JSON list of concept objects from Gemini output, handling code fences or multiple chunks."""
-    # Look for code fenced json first
-    json_blocks = re.findall(r"```(?:json)?\s*(\[.*?\])\s*```", gemini_raw_text, re.DOTALL)
-    combined_items: list[dict[str, Any]] = []
+def _salvage_truncated_json_array(chunk_text: str) -> list[dict[str, Any]]:
+    """Attempts to recover complete JSON objects from a truncated JSON array block."""
+    start = chunk_text.find("[")
+    if start == -1:
+        return []
+    candidate = chunk_text[start:]
+    # Walk backwards to find the last closing brace '}' that completes a valid JSON array when ']' is appended
+    pos = len(candidate)
+    while True:
+        brace_idx = candidate.rfind("}", 0, pos)
+        if brace_idx == -1:
+            break
+        attempt = candidate[: brace_idx + 1] + "\n]"
+        try:
+            data = json.loads(attempt)
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+        except json.JSONDecodeError:
+            pass
+        pos = brace_idx
+    return []
 
-    if json_blocks:
-        for block in json_blocks:
-            try:
-                data = json.loads(block)
-                if isinstance(data, list):
-                    combined_items.extend(data)
-            except json.JSONDecodeError:
-                continue
 
-    if combined_items:
-        return combined_items
+def _parse_single_chunk_json(chunk_text: str) -> list[dict[str, Any]]:
+    """Extracts a JSON list of concept objects from a single Gemini chunk."""
+    items: list[dict[str, Any]] = []
 
-    # If no valid code fence found, scan for raw JSON lists in text
-    raw_lists = re.findall(r"\[\s*\{.*?\}\s*\]", gemini_raw_text, re.DOTALL)
+    json_blocks = re.findall(r"```(?:json)?\s*(\[.*?\])\s*```", chunk_text, re.DOTALL)
+    for block in json_blocks:
+        try:
+            data = json.loads(block)
+            if isinstance(data, list):
+                items.extend(d for d in data if isinstance(d, dict))
+        except json.JSONDecodeError:
+            items.extend(_salvage_truncated_json_array(block))
+
+    if items:
+        return items
+
+    raw_lists = re.findall(r"\[\s*\{.*?\}\s*\]", chunk_text, re.DOTALL)
     for raw in raw_lists:
         try:
             data = json.loads(raw)
             if isinstance(data, list):
-                combined_items.extend(data)
+                items.extend(d for d in data if isinstance(d, dict))
         except json.JSONDecodeError:
             continue
 
+    if items:
+        return items
+
+    return _salvage_truncated_json_array(chunk_text)
+
+
+def parse_gemini_json_payload(gemini_raw_text: str) -> list[dict[str, Any]]:
+    """Extracts a JSON list of concept objects from Gemini output, handling code fences or multiple chunks."""
+    chunks = re.split(r"(?:^|\r?\n)[ \t]*---[ \t]*(?:\r?\n|$)", gemini_raw_text)
+    combined_items: list[dict[str, Any]] = []
+    for chunk in chunks:
+        if chunk.strip():
+            combined_items.extend(_parse_single_chunk_json(chunk))
     return combined_items
 
 

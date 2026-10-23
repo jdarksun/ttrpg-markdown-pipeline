@@ -3,8 +3,10 @@ import re
 import sys
 import tempfile
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pymupdf
 from google import genai
@@ -32,7 +34,276 @@ _EXHAUSTED_MODELS: set[str] = set()
 DEFAULT_GENERATION_CONFIG = types.GenerateContentConfig(
     temperature=0.1,
     max_output_tokens=65536,
+    thinking_config=types.ThinkingConfig(thinking_budget=2048),
 )
+
+
+def _safe_int(val: Any) -> int:
+    """Safely converts an integer metric (ignoring MagicMocks or booleans)."""
+    return val if isinstance(val, int) and not isinstance(val, bool) else 0
+
+
+def extract_response_usage(response: Any) -> dict[str, Any]:
+    """Extracts token counts and finish reason from a Gemini GenerateContentResponse."""
+    usage = getattr(response, "usage_metadata", None)
+    prompt_tokens = _safe_int(getattr(usage, "prompt_token_count", 0)) if usage else 0
+    candidates_tokens = _safe_int(getattr(usage, "candidates_token_count", 0)) if usage else 0
+    thoughts_tokens = _safe_int(getattr(usage, "thoughts_token_count", 0)) if usage else 0
+    total_tokens = _safe_int(getattr(usage, "total_token_count", 0)) if usage else 0
+    if total_tokens == 0 and (prompt_tokens or candidates_tokens or thoughts_tokens):
+        total_tokens = prompt_tokens + candidates_tokens + thoughts_tokens
+
+    finish_reason = "STOP"
+    candidates = getattr(response, "candidates", None)
+    if isinstance(candidates, (list, tuple)) and candidates:
+        raw_reason = getattr(candidates[0], "finish_reason", None)
+        if raw_reason is not None:
+            name = getattr(raw_reason, "name", None)
+            if isinstance(name, str) and name:
+                finish_reason = name
+            elif isinstance(raw_reason, str) and raw_reason:
+                finish_reason = raw_reason
+
+    return {
+        "prompt_tokens": prompt_tokens,
+        "candidates_tokens": candidates_tokens,
+        "thoughts_tokens": thoughts_tokens,
+        "total_tokens": total_tokens,
+        "finish_reason": finish_reason,
+    }
+
+
+@dataclass
+class ModelUsageStats:
+    """Aggregated token usage, call counts, latency, and finish reasons for a single model."""
+
+    calls_attempted: int = 0
+    calls_succeeded: int = 0
+    prompt_tokens: int = 0
+    candidates_tokens: int = 0
+    thoughts_tokens: int = 0
+    total_tokens: int = 0
+    total_latency_s: float = 0.0
+    finish_reasons: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class ErrorRecord:
+    """Detailed diagnostic record for a model API error or empty response."""
+
+    timestamp: str
+    context: str
+    model: str
+    error_type: str
+    status_code: int | None
+    quota_id: str | None
+    quota_limit: str | None
+    retry_delay: str | None
+    message: str
+    resolution: str
+
+
+@dataclass
+class ModelSwitchRecord:
+    """Records a fallback switch from one model in the desirability pool to the next."""
+
+    timestamp: str
+    context: str
+    from_model: str
+    to_model: str
+    error_type: str
+    reason: str
+    marked_exhausted: bool
+
+
+@dataclass
+class RunReport:
+    """Aggregates model usage indicators, model switches, and error diagnostics across a pipeline run."""
+
+    model_usage: dict[str, ModelUsageStats] = field(default_factory=dict)
+    switches: list[ModelSwitchRecord] = field(default_factory=list)
+    errors: list[ErrorRecord] = field(default_factory=list)
+    cached_chunks_skipped: int = 0
+
+    def reset(self) -> None:
+        self.model_usage.clear()
+        self.switches.clear()
+        self.errors.clear()
+        self.cached_chunks_skipped = 0
+
+    def record_attempt(self, model: str) -> None:
+        stats = self.model_usage.setdefault(model, ModelUsageStats())
+        stats.calls_attempted += 1
+
+    def record_success(self, model: str, response: Any, latency_s: float = 0.0) -> dict[str, Any]:
+        stats = self.model_usage.setdefault(model, ModelUsageStats())
+        stats.calls_succeeded += 1
+        stats.total_latency_s += max(0.0, latency_s)
+        usage = extract_response_usage(response)
+        stats.prompt_tokens += usage["prompt_tokens"]
+        stats.candidates_tokens += usage["candidates_tokens"]
+        stats.thoughts_tokens += usage["thoughts_tokens"]
+        stats.total_tokens += usage["total_tokens"]
+        reason = usage["finish_reason"]
+        stats.finish_reasons[reason] = stats.finish_reasons.get(reason, 0) + 1
+        return usage
+
+    def record_error(
+        self,
+        *,
+        timestamp: str,
+        context: str,
+        model: str,
+        error_type: str,
+        status_code: int | None,
+        quota_id: str | None,
+        quota_limit: str | None,
+        retry_delay: str | None,
+        message: str,
+        resolution: str,
+    ) -> None:
+        self.errors.append(
+            ErrorRecord(
+                timestamp=timestamp,
+                context=context,
+                model=model,
+                error_type=error_type,
+                status_code=status_code,
+                quota_id=quota_id,
+                quota_limit=quota_limit,
+                retry_delay=retry_delay,
+                message=message,
+                resolution=resolution,
+            )
+        )
+
+    def record_switch(
+        self,
+        *,
+        timestamp: str,
+        context: str,
+        from_model: str,
+        to_model: str,
+        error_type: str,
+        reason: str,
+        marked_exhausted: bool,
+    ) -> None:
+        self.switches.append(
+            ModelSwitchRecord(
+                timestamp=timestamp,
+                context=context,
+                from_model=from_model,
+                to_model=to_model,
+                error_type=error_type,
+                reason=reason,
+                marked_exhausted=marked_exhausted,
+            )
+        )
+
+    def format_report(self) -> str:
+        """Formats a detailed Markdown/CLI run report of model usage, switches, and error diagnostics."""
+        lines: list[str] = [
+            "# Gemini Extraction Run Report",
+            "",
+        ]
+        total_attempts = sum(s.calls_attempted for s in self.model_usage.values())
+        total_succeeded = sum(s.calls_succeeded for s in self.model_usage.values())
+        total_prompt = sum(s.prompt_tokens for s in self.model_usage.values())
+        total_output = sum(s.candidates_tokens for s in self.model_usage.values())
+        total_thoughts = sum(s.thoughts_tokens for s in self.model_usage.values())
+        total_tokens = sum(s.total_tokens for s in self.model_usage.values())
+
+        lines.extend(
+            [
+                "## 1. Overall Summary",
+                f"- **API Calls (Succeeded / Attempted):** {total_succeeded} / {total_attempts}",
+                f"- **Cached Chunks Reused:** {self.cached_chunks_skipped}",
+                f"- **Total Tokens Used:** {total_tokens:,} "
+                f"(Prompt: {total_prompt:,} | Output: {total_output:,} | Thinking: {total_thoughts:,})",
+                f"- **Model Switches Triggered:** {len(self.switches)}",
+                f"- **Total Error Events:** {len(self.errors)}",
+                f"- **Models Marked Exhausted/Unavailable:** "
+                f"{', '.join(sorted(_EXHAUSTED_MODELS)) if _EXHAUSTED_MODELS else 'None'}",
+                "",
+                "## 2. Per-Model Usage & Token Indicators",
+            ]
+        )
+
+        if not self.model_usage:
+            lines.append("_No live model calls were made during this run (all chunks served from cache)._")
+        else:
+            lines.extend(
+                [
+                    "| Model | Succeeded / Attempted | Prompt Tokens | Output Tokens | Thinking Tokens | Total Tokens | Avg Latency | Finish Reasons |",  # noqa: E501
+                    "| :--- | :---: | ---: | ---: | ---: | ---: | ---: | :--- |",
+                ]
+            )
+            for model_name, st in self.model_usage.items():
+                avg_lat = f"{st.total_latency_s / st.calls_succeeded:.1f}s" if st.calls_succeeded else "-"
+                reasons_str = (
+                    ", ".join(f"{k}:{v}" for k, v in sorted(st.finish_reasons.items())) if st.finish_reasons else "-"
+                )
+                lines.append(
+                    f"| `{model_name}` | {st.calls_succeeded} / {st.calls_attempted} | "
+                    f"{st.prompt_tokens:,} | {st.candidates_tokens:,} | {st.thoughts_tokens:,} | "
+                    f"{st.total_tokens:,} | {avg_lat} | {reasons_str} |"
+                )
+
+        lines.extend(["", "## 3. Model Switches (`from -> to` & Why)"])
+        if not self.switches:
+            lines.append("_No model switches occurred._")
+        else:
+            for idx, sw in enumerate(self.switches, 1):
+                ctx_prefix = f"[{sw.context}] " if sw.context else ""
+                perm_tag = " *(marked session-exhausted)*" if sw.marked_exhausted else " *(chunk-only fallback)*"
+                lines.append(
+                    f"{idx}. `{sw.timestamp}` {ctx_prefix}**`{sw.from_model}` -> `{sw.to_model}`** "
+                    f"[`{sw.error_type}`]: {sw.reason}{perm_tag}"
+                )
+
+        lines.extend(["", "## 4. Error Breakdown & Diagnostics"])
+        if not self.errors:
+            lines.append("_Zero API errors encountered._")
+        else:
+            counts_by_type: dict[str, int] = {}
+            for err in self.errors:
+                counts_by_type[err.error_type] = counts_by_type.get(err.error_type, 0) + 1
+            summary_parts = [f"`{k}`: {v}" for k, v in sorted(counts_by_type.items())]
+            lines.append(f"**Counts by Error Type:** {', '.join(summary_parts)}")
+            lines.append("")
+            for idx, err in enumerate(self.errors, 1):
+                ctx_prefix = f"[{err.context}] " if err.context else ""
+                meta_bits: list[str] = []
+                if err.status_code is not None:
+                    meta_bits.append(f"HTTP {err.status_code}")
+                if err.quota_id:
+                    meta_bits.append(f"quotaId={err.quota_id}")
+                if err.quota_limit is not None:
+                    meta_bits.append(f"limit={err.quota_limit}")
+                if err.retry_delay:
+                    meta_bits.append(f"retry_in={err.retry_delay}")
+                meta_str = f" ({', '.join(meta_bits)})" if meta_bits else ""
+                lines.append(
+                    f"{idx}. `{err.timestamp}` {ctx_prefix}`{err.model}` — **`{err.error_type}`**{meta_str}: "
+                    f"{err.message} -> *{err.resolution}*"
+                )
+
+        lines.append("")
+        return "\n".join(lines)
+
+
+_GLOBAL_RUN_REPORT = RunReport()
+
+
+def get_run_report() -> RunReport:
+    """Returns the active session RunReport singleton."""
+    return _GLOBAL_RUN_REPORT
+
+
+def reset_run_report() -> RunReport:
+    """Clears and returns the active session RunReport singleton."""
+    _GLOBAL_RUN_REPORT.reset()
+    return _GLOBAL_RUN_REPORT
 
 
 def discover_model_pool(client: genai.Client | None = None, strategy: str = "quality") -> list[str]:
@@ -56,8 +327,8 @@ def discover_model_pool(client: genai.Client | None = None, strategy: str = "qua
             return DEFAULT_DESIRABILITY_PATH
 
     try:
-        pattern = re.compile(r"^gemini-(\d+(?:\.\d+)?)-(pro|flash(?:-lite)?)$")
-        matches: list[tuple[str, str, tuple[int, ...]]] = []
+        pattern = re.compile(r"^gemini-(\d+(?:\.\d+)?)-(pro|flash(?:-lite)?)(?:-(preview))?$")
+        matches: list[tuple[str, str, tuple[int, ...], int]] = []
 
         for m in client.models.list():
             if not m.name:
@@ -65,11 +336,12 @@ def discover_model_pool(client: genai.Client | None = None, strategy: str = "qua
             clean = m.name.removeprefix("models/")
             res = pattern.match(clean)
             if res and "generateContent" in getattr(m, "supported_actions", []):
-                ver_str, flavor = res.groups()
+                ver_str, flavor, preview_tag = res.groups()
                 parts = tuple(int(p) for p in ver_str.split("."))
                 if len(parts) == 1:
                     parts = (parts[0], 0)
-                matches.append((clean, flavor, parts))
+                is_stable = 0 if preview_tag else 1
+                matches.append((clean, flavor, parts, is_stable))
 
         if not matches:
             return DEFAULT_DESIRABILITY_PATH
@@ -85,7 +357,7 @@ def discover_model_pool(client: genai.Client | None = None, strategy: str = "qua
             m[0]
             for m in sorted(
                 matches,
-                key=lambda x: (tier_map.get(x[1], 0), x[2]),
+                key=lambda x: (tier_map.get(x[1], 0), x[2], x[3]),
                 reverse=True,
             )
         ]
@@ -98,55 +370,268 @@ def discover_model_pool(client: genai.Client | None = None, strategy: str = "qua
 
 
 def is_daily_quota_exhausted(exc: BaseException) -> bool:
+    """Returns True if the error indicates a multi-hour/daily quota lockout or 0-limit quota."""
     err = str(exc).lower()
-    return "please retry in" in err and ("h" in err or "d" in err)
+    if re.search(r"please retry in\s+[0-9ms.]*\d+(?:\.\d+)?\s*[hd]", err):
+        return True
+    if re.search(r"per[_ ]?day|daily\s+quota", err):
+        return True
+    return bool(re.search(r"\blimit:\s*0\b", err))
 
 
-def generate_with_fallback(client: genai.Client, contents: list, model_pool: list[str]) -> tuple[str, str]:
+def parse_api_error_diagnostics(exc: BaseException) -> dict[str, Any]:
+    """Parses structured quota, retry-delay, and error-type diagnostics from a Gemini API exception."""
+    raw_str = str(exc)
+    err_lower = raw_str.lower()
+    raw_code = getattr(exc, "code", None)
+    status_code = raw_code if isinstance(raw_code, int) else None
+
+    quota_id: str | None = None
+    m_qid = re.search(r"'quotaId':\s*'([^']+)'", raw_str)
+    if m_qid:
+        quota_id = m_qid.group(1)
+    else:
+        m_metric = re.search(r"Quota exceeded for metric:\s*([^\s,\\'\"]+)", raw_str, re.IGNORECASE)
+        if m_metric:
+            quota_id = m_metric.group(1)
+
+    quota_limit: str | None = None
+    m_limit = re.search(r"limit:\s*(\d+)", raw_str, re.IGNORECASE) or re.search(r"'quotaValue':\s*'(\d+)'", raw_str)
+    if m_limit:
+        quota_limit = m_limit.group(1)
+
+    retry_delay: str | None = None
+    retry_seconds: float | None = None
+    m_retry = re.search(r"please retry in\s+([0-9dhms.]+)", raw_str, re.IGNORECASE)
+    if m_retry:
+        raw_delay = m_retry.group(1).rstrip(".")
+        # Trim excessive fractional seconds (e.g. 3h37m15.812117684s -> 3h37m15.8s)
+        retry_delay = re.sub(r"(\d+\.\d)\d+s", r"\1s", raw_delay)
+        total_s = 0.0
+        for val, unit in re.findall(r"(\d+(?:\.\d+)?)([dhms])", raw_delay.lower()):
+            mult = {"d": 86400.0, "h": 3600.0, "m": 60.0, "s": 1.0}[unit]
+            total_s += float(val) * mult
+        if total_s > 0:
+            retry_seconds = total_s
+
+    if status_code == 429 or "resource_exhausted" in err_lower or "please retry in" in err_lower:
+        if quota_limit == "0" or re.search(r"\blimit:\s*0\b", err_lower):
+            error_type = "zero_quota_limit"
+        elif is_daily_quota_exhausted(exc):
+            error_type = "daily_quota_exhausted"
+        else:
+            error_type = "rate_limit_429"
+    elif status_code == 503 or "high demand" in err_lower or "overloaded" in err_lower:
+        error_type = "high_demand_503"
+    elif status_code == 404 or "no longer available" in err_lower or "not found" in err_lower:
+        error_type = "not_found_or_deprecated_404"
+    else:
+        error_type = f"api_error_{status_code}" if status_code else "api_error"
+
+    raw_msg = getattr(exc, "message", None)
+    base_msg = str(raw_msg).strip() if isinstance(raw_msg, str) and raw_msg.strip() else raw_str
+    first_line = base_msg.splitlines()[0].strip()
+    if len(first_line) > 100:
+        first_line = first_line[:97] + "..."
+
+    meta_parts: list[str] = []
+    if quota_id:
+        meta_parts.append(f"quotaId={quota_id}")
+    if quota_limit is not None:
+        meta_parts.append(f"limit={quota_limit}")
+    if retry_delay:
+        meta_parts.append(f"retry_in={retry_delay}")
+    meta_suffix = f" [{' | '.join(meta_parts)}]" if meta_parts else ""
+    short_message = f"{first_line}{meta_suffix}"
+
+    return {
+        "status_code": status_code,
+        "error_type": error_type,
+        "quota_id": quota_id,
+        "quota_limit": quota_limit,
+        "retry_delay": retry_delay,
+        "retry_seconds": retry_seconds,
+        "short_message": short_message,
+    }
+
+
+def _next_available_model(model_pool: list[str], current_idx: int) -> str:
+    """Finds the next non-exhausted model in model_pool after current_idx."""
+    for candidate in model_pool[current_idx + 1 :]:
+        if candidate not in _EXHAUSTED_MODELS:
+            return candidate
+    return "<none (pool exhausted)>"
+
+
+def generate_with_fallback(
+    client: genai.Client,
+    contents: list,
+    model_pool: list[str],
+    *,
+    context: str = "",
+    report: RunReport | None = None,
+) -> tuple[str, str]:
     """Tries generation along the desirability path, cascading on exhaustion or failure.
 
     Models that hit daily quota limits are cached in-memory and skipped for subsequent calls.
     """
-    for model in model_pool:
+    active_report = report or _GLOBAL_RUN_REPORT
+
+    for idx, model in enumerate(model_pool):
         if model in _EXHAUSTED_MODELS:
             continue
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] Attempting generation with {model}...")
 
-        # Inner retry loop for transient 503s on the current model
+        # Inner retry loop for transient 503s or per-minute 429s on the current model
         for attempt in range(1, 6):
+            active_report.record_attempt(model)
+            t0 = time.monotonic()
             try:
                 response = client.models.generate_content(
                     model=model,
                     contents=contents,
                     config=DEFAULT_GENERATION_CONFIG,
                 )
+                latency_s = time.monotonic() - t0
                 if response.text:
+                    active_report.record_success(model, response, latency_s=latency_s)
                     return response.text.strip(), model
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[{ts}] [!] {model} returned an empty response. Cascading to next model...")
+                next_model = _next_available_model(model_pool, idx)
+                print(f"[{ts}] [!] {model} returned an empty response. Cascading to {next_model}...")
+                active_report.record_error(
+                    timestamp=ts,
+                    context=context,
+                    model=model,
+                    error_type="empty_response",
+                    status_code=None,
+                    quota_id=None,
+                    quota_limit=None,
+                    retry_delay=None,
+                    message="Model returned empty response text",
+                    resolution=f"Cascaded to {next_model}",
+                )
+                active_report.record_switch(
+                    timestamp=ts,
+                    context=context,
+                    from_model=model,
+                    to_model=next_model,
+                    error_type="empty_response",
+                    reason="Model returned empty response text",
+                    marked_exhausted=False,
+                )
                 break
             except errors.APIError as e:
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                diag = parse_api_error_diagnostics(e)
+                err_type = diag["error_type"]
+                short_msg = diag["short_message"]
+
                 if is_daily_quota_exhausted(e):
-                    print(f"[{ts}] [!] Daily quota exhausted for {model}. Cascading to next model...")
                     _EXHAUSTED_MODELS.add(model)
+                    next_model = _next_available_model(model_pool, idx)
+                    print(
+                        f"[{ts}] [!] Daily/zero quota exhausted for {model} ({short_msg}). Cascading to {next_model}..."
+                    )
+                    active_report.record_error(
+                        timestamp=ts,
+                        context=context,
+                        model=model,
+                        error_type=err_type,
+                        status_code=diag["status_code"],
+                        quota_id=diag["quota_id"],
+                        quota_limit=diag["quota_limit"],
+                        retry_delay=diag["retry_delay"],
+                        message=short_msg,
+                        resolution=f"Marked exhausted; cascaded to {next_model}",
+                    )
+                    active_report.record_switch(
+                        timestamp=ts,
+                        context=context,
+                        from_model=model,
+                        to_model=next_model,
+                        error_type=err_type,
+                        reason=short_msg,
+                        marked_exhausted=True,
+                    )
                     break  # Break inner loop to trigger next model in pool
 
                 if e.code == 404 or (e.message and "no longer available" in e.message.lower()):
-                    print(f"[{ts}] [!] {model} unavailable or deprecated ({e.code}). Cascading to next model...")
                     _EXHAUSTED_MODELS.add(model)
+                    next_model = _next_available_model(model_pool, idx)
+                    print(f"[{ts}] [!] {model} unavailable or deprecated ({short_msg}). Cascading to {next_model}...")
+                    active_report.record_error(
+                        timestamp=ts,
+                        context=context,
+                        model=model,
+                        error_type=err_type,
+                        status_code=diag["status_code"],
+                        quota_id=diag["quota_id"],
+                        quota_limit=diag["quota_limit"],
+                        retry_delay=diag["retry_delay"],
+                        message=short_msg,
+                        resolution=f"Marked unavailable; cascaded to {next_model}",
+                    )
+                    active_report.record_switch(
+                        timestamp=ts,
+                        context=context,
+                        from_model=model,
+                        to_model=next_model,
+                        error_type=err_type,
+                        reason=short_msg,
+                        marked_exhausted=True,
+                    )
                     break
 
                 if attempt == 5:
-                    err_msg = f"{e.code}: {e.message[:60]}" if e.message else str(e.code)
-                    print(f"[{ts}] [!] {model} unavailable after 5 attempts ({err_msg}). Cascading...")
+                    next_model = _next_available_model(model_pool, idx)
+                    print(
+                        f"[{ts}] [!] {model} unavailable after 5 attempts ({short_msg}). Cascading to {next_model}..."
+                    )
+                    active_report.record_error(
+                        timestamp=ts,
+                        context=context,
+                        model=model,
+                        error_type=err_type,
+                        status_code=diag["status_code"],
+                        quota_id=diag["quota_id"],
+                        quota_limit=diag["quota_limit"],
+                        retry_delay=diag["retry_delay"],
+                        message=short_msg,
+                        resolution=f"Max retries (5/5) reached; cascaded to {next_model}",
+                    )
+                    active_report.record_switch(
+                        timestamp=ts,
+                        context=context,
+                        from_model=model,
+                        to_model=next_model,
+                        error_type=err_type,
+                        reason=f"Failed after 5/5 attempts: {short_msg}",
+                        marked_exhausted=False,
+                    )
                     break
 
-                backoff = min(attempt * 12 if e.code in (429, 503) else attempt * 5, 60)
-                err_msg = f"{e.code}: {e.message[:60]}" if e.message else str(e.code)
-                print(f"[{ts}] [!] Transient {model} error ({err_msg}). Retrying in {backoff}s ({attempt}/5)...")
+                default_backoff = min(attempt * 12 if e.code in (429, 503) else attempt * 5, 60)
+                suggested_wait = int(diag["retry_seconds"]) + 2 if diag["retry_seconds"] else 0
+                backoff = min(max(default_backoff, suggested_wait), 90)
+                print(
+                    f"[{ts}] [!] Transient {model} error ({err_type}: {short_msg}). "
+                    f"Retrying in {backoff}s ({attempt}/5)..."
+                )
+                active_report.record_error(
+                    timestamp=ts,
+                    context=context,
+                    model=model,
+                    error_type=err_type,
+                    status_code=diag["status_code"],
+                    quota_id=diag["quota_id"],
+                    quota_limit=diag["quota_limit"],
+                    retry_delay=diag["retry_delay"],
+                    message=short_msg,
+                    resolution=f"Retrying in {backoff}s (attempt {attempt}/5)",
+                )
                 time.sleep(backoff)
 
     raise RuntimeError("All models in the desirability path failed or exhausted quota.")
@@ -229,6 +714,7 @@ def extract_pdf(
                 label = f"[{start_idx + 1:02d}–{end_idx:02d}/{total_pages}]"
 
                 if chunk_file.exists():
+                    _GLOBAL_RUN_REPORT.cached_chunks_skipped += 1
                     print(f"[{ts}] {label} Found cached chunk. Skipping...")
                     continue
 
@@ -245,6 +731,7 @@ def extract_pdf(
                     client=client,
                     contents=[uploaded_file, prompt],
                     model_pool=model_pool,
+                    context=f"{pdf_path.name} {label}",
                 )
 
                 chunk_file.write_text(text, encoding="utf-8")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -16,10 +17,14 @@ from ttrpg_markdown_pipeline.common import load_env_file
 from ttrpg_markdown_pipeline.extractors.gemini import (
     _EXHAUSTED_MODELS,
     DEFAULT_GENERATION_CONFIG,
+    RunReport,
+    _next_available_model,
     chunk_file_for,
     compute_chunk_ranges,
     discover_model_pool,
+    get_run_report,
     is_daily_quota_exhausted,
+    parse_api_error_diagnostics,
 )
 from ttrpg_markdown_pipeline.rules.cosmere import DEFAULT_PROMPT
 
@@ -28,9 +33,14 @@ async def generate_with_fallback_async(
     client: genai.Client,
     contents: list,
     model_pool: list[str],
+    *,
+    context: str = "",
+    report: RunReport | None = None,
 ) -> tuple[str, str]:
     """Tries async generation along the desirability path, cascading on exhaustion or failure."""
-    for model in model_pool:
+    active_report = report or get_run_report()
+
+    for idx, model in enumerate(model_pool):
         if model in _EXHAUSTED_MODELS:
             continue
 
@@ -38,37 +48,160 @@ async def generate_with_fallback_async(
         print(f"[{ts}] Attempting async generation with {model}...")
 
         for attempt in range(1, 6):
+            active_report.record_attempt(model)
+            t0 = time.monotonic()
             try:
                 response = await client.aio.models.generate_content(
                     model=model,
                     contents=contents,
                     config=DEFAULT_GENERATION_CONFIG,
                 )
+                latency_s = time.monotonic() - t0
                 if response.text:
+                    usage = active_report.record_success(model, response, latency_s=latency_s)
+                    if usage["total_tokens"] > 0:
+                        ts_done = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        print(
+                            f"[{ts_done}] {context + ' ' if context else ''}Usage ({model}): "
+                            f"prompt={usage['prompt_tokens']:,}, output={usage['candidates_tokens']:,}, "
+                            f"thoughts={usage['thoughts_tokens']:,}, total={usage['total_tokens']:,} "
+                            f"tokens | finish={usage['finish_reason']} | {latency_s:.1f}s"
+                        )
                     return response.text.strip(), model
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[{ts}] [!] {model} returned an empty response. Cascading to next model...")
+                next_model = _next_available_model(model_pool, idx)
+                print(f"[{ts}] [!] {model} returned an empty response. Cascading to {next_model}...")
+                active_report.record_error(
+                    timestamp=ts,
+                    context=context,
+                    model=model,
+                    error_type="empty_response",
+                    status_code=None,
+                    quota_id=None,
+                    quota_limit=None,
+                    retry_delay=None,
+                    message="Model returned empty response text",
+                    resolution=f"Cascaded to {next_model}",
+                )
+                active_report.record_switch(
+                    timestamp=ts,
+                    context=context,
+                    from_model=model,
+                    to_model=next_model,
+                    error_type="empty_response",
+                    reason="Model returned empty response text",
+                    marked_exhausted=False,
+                )
                 break
             except errors.APIError as e:
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                diag = parse_api_error_diagnostics(e)
+                err_type = diag["error_type"]
+                short_msg = diag["short_message"]
+
                 if is_daily_quota_exhausted(e):
-                    print(f"[{ts}] [!] Daily quota exhausted for {model}. Cascading to next model...")
                     _EXHAUSTED_MODELS.add(model)
+                    next_model = _next_available_model(model_pool, idx)
+                    print(
+                        f"[{ts}] [!] Daily/zero quota exhausted for {model} ({short_msg}). Cascading to {next_model}..."
+                    )
+                    active_report.record_error(
+                        timestamp=ts,
+                        context=context,
+                        model=model,
+                        error_type=err_type,
+                        status_code=diag["status_code"],
+                        quota_id=diag["quota_id"],
+                        quota_limit=diag["quota_limit"],
+                        retry_delay=diag["retry_delay"],
+                        message=short_msg,
+                        resolution=f"Marked exhausted; cascaded to {next_model}",
+                    )
+                    active_report.record_switch(
+                        timestamp=ts,
+                        context=context,
+                        from_model=model,
+                        to_model=next_model,
+                        error_type=err_type,
+                        reason=short_msg,
+                        marked_exhausted=True,
+                    )
                     break
 
                 if e.code == 404 or (e.message and "no longer available" in e.message.lower()):
-                    print(f"[{ts}] [!] {model} unavailable or deprecated ({e.code}). Cascading to next model...")
                     _EXHAUSTED_MODELS.add(model)
+                    next_model = _next_available_model(model_pool, idx)
+                    print(f"[{ts}] [!] {model} unavailable or deprecated ({short_msg}). Cascading to {next_model}...")
+                    active_report.record_error(
+                        timestamp=ts,
+                        context=context,
+                        model=model,
+                        error_type=err_type,
+                        status_code=diag["status_code"],
+                        quota_id=diag["quota_id"],
+                        quota_limit=diag["quota_limit"],
+                        retry_delay=diag["retry_delay"],
+                        message=short_msg,
+                        resolution=f"Marked unavailable; cascaded to {next_model}",
+                    )
+                    active_report.record_switch(
+                        timestamp=ts,
+                        context=context,
+                        from_model=model,
+                        to_model=next_model,
+                        error_type=err_type,
+                        reason=short_msg,
+                        marked_exhausted=True,
+                    )
                     break
 
                 if attempt == 5:
-                    err_msg = f"{e.code}: {e.message[:60]}" if e.message else str(e.code)
-                    print(f"[{ts}] [!] {model} unavailable after 5 attempts ({err_msg}). Cascading...")
+                    next_model = _next_available_model(model_pool, idx)
+                    print(
+                        f"[{ts}] [!] {model} unavailable after 5 attempts ({short_msg}). Cascading to {next_model}..."
+                    )
+                    active_report.record_error(
+                        timestamp=ts,
+                        context=context,
+                        model=model,
+                        error_type=err_type,
+                        status_code=diag["status_code"],
+                        quota_id=diag["quota_id"],
+                        quota_limit=diag["quota_limit"],
+                        retry_delay=diag["retry_delay"],
+                        message=short_msg,
+                        resolution=f"Max retries (5/5) reached; cascaded to {next_model}",
+                    )
+                    active_report.record_switch(
+                        timestamp=ts,
+                        context=context,
+                        from_model=model,
+                        to_model=next_model,
+                        error_type=err_type,
+                        reason=f"Failed after 5/5 attempts: {short_msg}",
+                        marked_exhausted=False,
+                    )
                     break
 
-                backoff = min(attempt * 12 if e.code in (429, 503) else attempt * 5, 60)
-                err_msg = f"{e.code}: {e.message[:60]}" if e.message else str(e.code)
-                print(f"[{ts}] [!] Transient {model} error ({err_msg}). Retrying in {backoff}s ({attempt}/5)...")
+                default_backoff = min(attempt * 12 if e.code in (429, 503) else attempt * 5, 60)
+                suggested_wait = int(diag["retry_seconds"]) + 2 if diag["retry_seconds"] else 0
+                backoff = min(max(default_backoff, suggested_wait), 90)
+                print(
+                    f"[{ts}] [!] Transient {model} error ({err_type}: {short_msg}). "
+                    f"Retrying in {backoff}s ({attempt}/5)..."
+                )
+                active_report.record_error(
+                    timestamp=ts,
+                    context=context,
+                    model=model,
+                    error_type=err_type,
+                    status_code=diag["status_code"],
+                    quota_id=diag["quota_id"],
+                    quota_limit=diag["quota_limit"],
+                    retry_delay=diag["retry_delay"],
+                    message=short_msg,
+                    resolution=f"Retrying in {backoff}s (attempt {attempt}/5)",
+                )
                 await asyncio.sleep(backoff)
 
     raise RuntimeError("All models in the desirability path failed or exhausted quota.")
@@ -90,6 +223,7 @@ async def _process_chunk_async(
     label = f"[{start_idx + 1:02d}–{end_idx:02d}/{total_pages}]"
 
     if chunk_file.exists():
+        get_run_report().cached_chunks_skipped += 1
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] {label} Found cached chunk. Skipping...")
         return chunk_file.read_text(encoding="utf-8")
@@ -130,6 +264,7 @@ async def _process_chunk_async(
                     client=client,
                     contents=[uploaded_file, prompt],
                     model_pool=model_pool,
+                    context=f"{pdf_path.name} {label}",
                 )
                 chunk_file.write_text(text, encoding="utf-8")
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

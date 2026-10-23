@@ -16,6 +16,7 @@ from docling.document_converter import DocumentConverter
 from ttrpg_markdown_pipeline.common import DOCLING_TAG, GEMINI_TAG, clean_path, tagged_md_path
 from ttrpg_markdown_pipeline.extractors.api import extract_pdf_async
 from ttrpg_markdown_pipeline.extractors.docling import convert_pdf
+from ttrpg_markdown_pipeline.extractors.gemini import get_run_report, reset_run_report
 from ttrpg_markdown_pipeline.processors.bundler import bundle_vault
 from ttrpg_markdown_pipeline.processors.linker import cross_link_vault
 from ttrpg_markdown_pipeline.processors.patch import patch_file
@@ -273,6 +274,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     print(" PIPELINE EXECUTION STARTING (OKF ARCHITECTURE)")
     print("=" * 50)
 
+    reset_run_report()
     converter = LazyConverter()
     failures: list[tuple[str, str]] = []
 
@@ -313,6 +315,17 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
         print(f"  -> Generated {len(bundles)} category bundle(s):")
         for b in bundles:
             print(f"     - {b.name}")
+
+    # 5. Print and save Gemini Extraction Run Report
+    if not args.docling_only:
+        report_text = get_run_report().format_report()
+        report_path = base_dir / "run_report.md"
+        report_path.write_text(report_text, encoding="utf-8")
+        print("\n" + "=" * 50)
+        print(" GEMINI EXTRACTION RUN REPORT")
+        print("=" * 50)
+        print(report_text)
+        print(f"  -> Saved Run Report to: {report_path}")
 
     print("\n" + "=" * 50)
     if failures:

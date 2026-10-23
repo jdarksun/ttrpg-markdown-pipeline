@@ -10,11 +10,13 @@ from ttrpg_markdown_pipeline.extractors.gemini import (
     _EXHAUSTED_MODELS,
     _MODEL_POOL_CACHE,
     DEFAULT_DESIRABILITY_PATH,
+    RunReport,
     chunk_file_for,
     compute_chunk_ranges,
     discover_model_pool,
     generate_with_fallback,
     is_daily_quota_exhausted,
+    parse_api_error_diagnostics,
 )
 from ttrpg_markdown_pipeline.extractors.gemini import (
     extract_pdf as gemini_extract_pdf,
@@ -26,10 +28,97 @@ def test_is_daily_quota_exhausted():
     # Daily quota message variations
     assert is_daily_quota_exhausted(Exception("ResourceExhausted: please retry in 14h30m")) is True
     assert is_daily_quota_exhausted(Exception("Rate limit reached. Please retry in 1d")) is True
+    assert is_daily_quota_exhausted(Exception("429 RESOURCE_EXHAUSTED: Please retry in 3h37m15.812s.")) is True
+    assert (
+        is_daily_quota_exhausted(
+            Exception("429 RESOURCE_EXHAUSTED: quotaId='GenerateRequestsPerDayPerProjectPerModel-FreeTier'")
+        )
+        is True
+    )
+    assert is_daily_quota_exhausted(Exception("429 RESOURCE_EXHAUSTED: limit: 0, model: gemini-3.8-pro")) is True
+
+    # Short per-minute 429 rate limits must NOT be misclassified as daily quota exhaustion
+    assert (
+        is_daily_quota_exhausted(
+            Exception(
+                "429 RESOURCE_EXHAUSTED: You exceeded your current quota, please check your plan "
+                "and billing details. Please retry in 24.5s."
+            )
+        )
+        is False
+    )
 
     # Transient errors (should not be considered daily exhaustion)
     assert is_daily_quota_exhausted(Exception("503 Service Unavailable: overloaded")) is False
     assert is_daily_quota_exhausted(Exception("400 Bad Request: invalid argument")) is False
+
+
+def test_parse_api_error_diagnostics_and_run_report():
+    err = errors.APIError(
+        429,
+        {
+            "error": {
+                "code": 429,
+                "message": "Quota exceeded for metric: free_tier_requests, limit: 20\nPlease retry in 3h37m15.812117s.",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                        "violations": [
+                            {
+                                "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                                "quotaValue": "20",
+                            }
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+    diag = parse_api_error_diagnostics(err)
+    assert diag["status_code"] == 429
+    assert diag["error_type"] == "daily_quota_exhausted"
+    assert diag["quota_id"] == "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+    assert diag["quota_limit"] == "20"
+    assert diag["retry_delay"] == "3h37m15.8s"
+
+    _EXHAUSTED_MODELS.clear()
+    report = RunReport()
+    client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.text = "Generated markdown"
+    mock_resp.usage_metadata = MagicMock(
+        prompt_token_count=1200,
+        candidates_token_count=450,
+        thoughts_token_count=100,
+        total_token_count=1750,
+    )
+    cand = MagicMock()
+    cand.finish_reason = "STOP"
+    mock_resp.candidates = [cand]
+
+    client.models.generate_content.side_effect = [err, mock_resp]
+
+    text, model_used = generate_with_fallback(
+        client,
+        ["content"],
+        ["gemini-3.8-flash", "gemini-3-flash-preview"],
+        context="01-Chapter 1.pdf [01-05/14]",
+        report=report,
+    )
+    assert text == "Generated markdown"
+    assert model_used == "gemini-3-flash-preview"
+    assert len(report.switches) == 1
+    assert report.switches[0].from_model == "gemini-3.8-flash"
+    assert report.switches[0].to_model == "gemini-3-flash-preview"
+    assert report.switches[0].marked_exhausted is True
+    assert len(report.errors) == 1
+    assert report.errors[0].error_type == "daily_quota_exhausted"
+
+    formatted = report.format_report()
+    assert "Gemini Extraction Run Report" in formatted
+    assert "`gemini-3.8-flash` -> `gemini-3-flash-preview`" in formatted
+    assert "GenerateRequestsPerDayPerProjectPerModel-FreeTier" in formatted
+    assert "1,750" in formatted
 
 
 def test_chunk_file_for(tmp_path: Path):
