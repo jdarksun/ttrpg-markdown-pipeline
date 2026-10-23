@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pymupdf
 from google import genai
-from google.genai import errors
+from google.genai import errors, types
 
 from ttrpg_markdown_pipeline.common import GEMINI_TAG, clean_path, load_env_file, resolve_md_output
 from ttrpg_markdown_pipeline.rules.cosmere import DEFAULT_PROMPT
@@ -29,13 +29,19 @@ DESIRABILITY_PATH = DEFAULT_DESIRABILITY_PATH
 _MODEL_POOL_CACHE: dict[str, list[str]] = {}
 _EXHAUSTED_MODELS: set[str] = set()
 
+DEFAULT_GENERATION_CONFIG = types.GenerateContentConfig(
+    temperature=0.1,
+    max_output_tokens=65536,
+)
+
 
 def discover_model_pool(client: genai.Client | None = None, strategy: str = "quality") -> list[str]:
     """Dynamically queries Gemini API for available models, filtered and sorted by strategy.
 
     Strategies:
-      - 'quality': Prioritizes standard Flash models by version (newest first), then Flash-Lite.
-      - 'quota': Prioritizes Flash-Lite models by version (newest first), then standard Flash.
+      - 'pro': Prioritizes Pro models (newest first), then standard Flash, then Flash-Lite.
+      - 'quality': Prioritizes standard Flash models by version (newest first), then Pro, then Flash-Lite.
+      - 'quota': Prioritizes Flash-Lite models by version (newest first), then standard Flash, then Pro.
 
     Results are cached in-memory per strategy so discovery runs at most once per session.
     """
@@ -50,7 +56,7 @@ def discover_model_pool(client: genai.Client | None = None, strategy: str = "qua
             return DEFAULT_DESIRABILITY_PATH
 
     try:
-        pattern = re.compile(r"^gemini-(\d+(?:\.\d+)?)-(flash(?:-lite)?)$")
+        pattern = re.compile(r"^gemini-(\d+(?:\.\d+)?)-(pro|flash(?:-lite)?)$")
         matches: list[tuple[str, str, tuple[int, ...]]] = []
 
         for m in client.models.list():
@@ -68,26 +74,21 @@ def discover_model_pool(client: genai.Client | None = None, strategy: str = "qua
         if not matches:
             return DEFAULT_DESIRABILITY_PATH
 
-        if strategy == "quota":
-            # Flash-Lite tier 2, Flash tier 1 -> descending puts Flash-Lite first
-            sorted_models = [
-                m[0]
-                for m in sorted(
-                    matches,
-                    key=lambda x: (2 if x[1] == "flash-lite" else 1, x[2]),
-                    reverse=True,
-                )
-            ]
+        if strategy == "pro":
+            tier_map = {"pro": 3, "flash": 2, "flash-lite": 1}
+        elif strategy == "quota":
+            tier_map = {"flash-lite": 3, "flash": 2, "pro": 1}
         else:
-            # Quality: Flash tier 2, Flash-Lite tier 1 -> descending puts Flash first
-            sorted_models = [
-                m[0]
-                for m in sorted(
-                    matches,
-                    key=lambda x: (2 if x[1] == "flash" else 1, x[2]),
-                    reverse=True,
-                )
-            ]
+            tier_map = {"flash": 3, "pro": 2, "flash-lite": 1}
+
+        sorted_models = [
+            m[0]
+            for m in sorted(
+                matches,
+                key=lambda x: (tier_map.get(x[1], 0), x[2]),
+                reverse=True,
+            )
+        ]
 
         _MODEL_POOL_CACHE[strategy] = sorted_models
         return sorted_models
@@ -116,7 +117,11 @@ def generate_with_fallback(client: genai.Client, contents: list, model_pool: lis
         # Inner retry loop for transient 503s on the current model
         for attempt in range(1, 6):
             try:
-                response = client.models.generate_content(model=model, contents=contents)
+                response = client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=DEFAULT_GENERATION_CONFIG,
+                )
                 if response.text:
                     return response.text.strip(), model
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -151,11 +156,31 @@ def chunk_file_for(cache_dir: Path, start_idx: int, end_idx: int) -> Path:
     return cache_dir / f"chunk_{start_idx + 1:03d}_{end_idx:03d}.md"
 
 
+def compute_chunk_ranges(total_pages: int, chunk_size: int = 5, chunk_overlap: int = 1) -> list[tuple[int, int]]:
+    """Computes page (start_idx, end_idx) slice ranges with optional overlap across chunk boundaries."""
+    if total_pages <= 0:
+        return []
+    effective_size = max(1, chunk_size)
+    effective_overlap = min(max(0, chunk_overlap), effective_size - 1)
+    step = max(1, effective_size - effective_overlap)
+
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    while start < total_pages:
+        end = min(start + effective_size, total_pages)
+        ranges.append((start, end))
+        if end >= total_pages:
+            break
+        start += step
+    return ranges
+
+
 def extract_pdf(
     pdf_path: Path,
     output_path: Path,
     *,
-    chunk_size: int = 8,
+    chunk_size: int = 5,
+    chunk_overlap: int = 1,
     prompt: str = DEFAULT_PROMPT,
     model_pool: list[str] | None = None,
     strategy: str = "quality",
@@ -191,7 +216,7 @@ def extract_pdf(
     print(f"Active model pool ({strategy}): {', '.join(model_pool)}")
     doc = pymupdf.open(pdf_path)
     total_pages = len(doc)
-    chunk_ranges = [(s, min(s + chunk_size, total_pages)) for s in range(0, total_pages, chunk_size)]
+    chunk_ranges = compute_chunk_ranges(total_pages, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
     try:
         # Unique temp dir per run, so concurrent runs never clobber each other's chunk PDF
@@ -253,15 +278,15 @@ def main() -> None:
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=8,
-        help="Number of pages per processing chunk (default: 8)",
+        default=5,
+        help="Number of pages per processing chunk (default: 5)",
     )
     parser.add_argument(
         "--strategy",
-        choices=["quality", "quota"],
+        choices=["pro", "quality", "quota"],
         default="quality",
-        help="Model cascade strategy: 'quality' prefers highest-capability Flash models; "
-        "'quota' prefers highest-rate-limit Flash-Lite models (default: quality).",
+        help="Model cascade strategy: 'pro' prefers Pro models; 'quality' prefers Flash models; "
+        "'quota' prefers Flash-Lite models (default: quality).",
     )
     parser.add_argument(
         "--model",

@@ -15,7 +15,9 @@ from google.genai import errors
 from ttrpg_markdown_pipeline.common import load_env_file
 from ttrpg_markdown_pipeline.extractors.gemini import (
     _EXHAUSTED_MODELS,
+    DEFAULT_GENERATION_CONFIG,
     chunk_file_for,
+    compute_chunk_ranges,
     discover_model_pool,
     is_daily_quota_exhausted,
 )
@@ -37,7 +39,11 @@ async def generate_with_fallback_async(
 
         for attempt in range(1, 6):
             try:
-                response = await client.aio.models.generate_content(model=model, contents=contents)
+                response = await client.aio.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=DEFAULT_GENERATION_CONFIG,
+                )
                 if response.text:
                     return response.text.strip(), model
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -142,7 +148,8 @@ async def extract_pdf_async(
     pdf_path: Path,
     output_path: Path,
     *,
-    chunk_size: int = 8,
+    chunk_size: int = 5,
+    chunk_overlap: int = 1,
     prompt: str = DEFAULT_PROMPT,
     model_pool: list[str] | None = None,
     strategy: str = "quality",
@@ -173,7 +180,7 @@ async def extract_pdf_async(
     total_pages = len(doc)
     doc.close()
 
-    chunk_ranges = [(s, min(s + chunk_size, total_pages)) for s in range(0, total_pages, chunk_size)]
+    chunk_ranges = compute_chunk_ranges(total_pages, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     semaphore = asyncio.Semaphore(max_concurrency)
 
     tasks = [

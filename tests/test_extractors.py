@@ -11,6 +11,7 @@ from ttrpg_markdown_pipeline.extractors.gemini import (
     _MODEL_POOL_CACHE,
     DEFAULT_DESIRABILITY_PATH,
     chunk_file_for,
+    compute_chunk_ranges,
     discover_model_pool,
     generate_with_fallback,
     is_daily_quota_exhausted,
@@ -35,6 +36,16 @@ def test_chunk_file_for(tmp_path: Path):
     assert chunk_file_for(tmp_path, 0, 8) == tmp_path / "chunk_001_008.md"
     assert chunk_file_for(tmp_path, 8, 16) == tmp_path / "chunk_009_016.md"
     assert chunk_file_for(tmp_path, 16, 21) == tmp_path / "chunk_017_021.md"
+
+
+def test_compute_chunk_ranges():
+    # 12 pages with chunk_size=5, overlap=1 -> step=4: (0,5), (4,9), (8,12)
+    assert compute_chunk_ranges(12, chunk_size=5, chunk_overlap=1) == [(0, 5), (4, 9), (8, 12)]
+    # 5 pages with chunk_size=5, overlap=1 -> single range (0,5)
+    assert compute_chunk_ranges(5, chunk_size=5, chunk_overlap=1) == [(0, 5)]
+    # chunk_size=1 clamps overlap to 0 -> (0,1), (1,2)
+    assert compute_chunk_ranges(2, chunk_size=1, chunk_overlap=1) == [(0, 1), (1, 2)]
+    assert compute_chunk_ranges(0, chunk_size=5, chunk_overlap=1) == []
 
 
 def test_generate_with_fallback_success():
@@ -147,6 +158,14 @@ def test_discover_model_pool_strategies():
         "gemini-3.8-flash",
         "gemini-2.5-flash",
     ]
+
+    m_pro = MagicMock(supported_actions=["generateContent"])
+    m_pro.name = "models/gemini-3.8-pro"
+    mock_client.models.list.return_value = [m1, m2, m3, m4, m_pro, m_skip]
+
+    _MODEL_POOL_CACHE.clear()
+    pro_pool = discover_model_pool(mock_client, strategy="pro")
+    assert pro_pool[0] == "gemini-3.8-pro"
 
 
 def test_discover_model_pool_fallback_on_error():

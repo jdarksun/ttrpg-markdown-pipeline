@@ -16,6 +16,7 @@ from ttrpg_markdown_pipeline.extractors.gemini import _EXHAUSTED_MODELS
 
 @pytest.mark.anyio
 async def test_generate_with_fallback_async_success():
+    _EXHAUSTED_MODELS.clear()
     client = MagicMock()
     mock_resp = MagicMock()
     mock_resp.text = "Async response content"

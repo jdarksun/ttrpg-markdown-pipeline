@@ -216,7 +216,7 @@ def process_chapter(
     *,
     force: bool = False,
     docling_only: bool = False,
-    chunk_size: int = 8,
+    chunk_size: int = 5,
     gemini_strategy: str = "quality",
     sourcebook: str = "TTRPG Rulebook",
     vault_dir: Path | None = None,
@@ -380,17 +380,17 @@ def main() -> None:
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=8,
-        help="Pages per Gemini request (default: 8).",
+        default=5,
+        help="Pages per Gemini request (default: 5).",
     )
     parser.add_argument(
         "--strategy",
         "--gemini-strategy",
         dest="gemini_strategy",
-        choices=["quality", "quota"],
+        choices=["pro", "quality", "quota"],
         default="quality",
-        help="Gemini model cascade strategy: 'quality' prefers highest-capability Flash models; "
-        "'quota' prefers highest-rate-limit Flash-Lite models (default: quality).",
+        help="Gemini model cascade strategy: 'pro' prefers Pro models; 'quality' prefers Flash models; "
+        "'quota' prefers Flash-Lite models (default: quality).",
     )
     parser.add_argument(
         "--concurrency",
