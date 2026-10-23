@@ -47,6 +47,37 @@ def sanitize_filename(name: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+# ==============================================================================
+# ARCHITECTURAL DESIGN: FIDELITY-FIRST DENYLIST ROUTING & DUAL-EXTRACTOR ROLES
+# ==============================================================================
+# 1. Fidelity-First Denylist Architecture (CHAPTER_DENYLIST + UNIFIED_PROMPT):
+#    TTRPG sourcebooks notoriously interleave core mechanics, character creation
+#    procedures, GM adjudication subsystems, and rich worldbuilding inside chapters
+#    with non-obvious titles (e.g. "Introduction", "Gamemastering", "The Next Step").
+#    Using an allowlist of chapter titles would risk dropping critical mechanical
+#    rules. Instead, the pipeline employs a metadata-only denylist (Credits, TOC,
+#    Index, Character Sheets) and routes ALL non-denylisted chapters to chap_mode = "mechanics"
+#    (UNIFIED_PROMPT) by default. UNIFIED_PROMPT extracts both mechanical rules/catalogs
+#    and worldbuilding lore in a single high-fidelity pass, guaranteeing 0% missed rules.
+#
+# 2. Specialized Mode Keywords (MECHANICS_KEYWORDS, LORE_KEYWORDS, ADVENTURE_KEYWORDS):
+#    These keyword sets are used solely when specialized modes (--include-lore or
+#    --adventure-mode) are explicitly enabled. LORE_KEYWORDS routes pure setting chapters
+#    to LORE_PROMPT without overriding substantive mechanical chapters (e.g. "Appendix A:
+#    Equipment" matches MECHANICS_KEYWORDS and remains on UNIFIED_PROMPT).
+#
+# 3. Dual Role of Docling vs. Gemini Vision:
+#    - Gemini Vision body_text is preferred for atomic OKF vault concepts because
+#      Vision directly recognizes Private Use Area (PUA) action economy symbols
+#      ([1 Action], [Reaction], [Opportunity]) and visual multi-column table boundaries.
+#    - Docling provides the full-chapter linear Markdown ground truth (<Chapter> - DOCLING.md),
+#      handles denylisted reference chapters (Glossary, Index), and acts as a layout
+#      fallback if Gemini ever omits body_text.
+#    - When only OKF vaults/bundles are needed, --skip-docling allows bypassing Docling
+#      OCR to conserve local compute resources.
+# ==============================================================================
+
+
 def split_pdf_by_chapters(
     pdf_path: Path,
     output_dir: Path,
@@ -154,24 +185,41 @@ async def process_chapter_async(
     chunk_size: int,
     gemini_strategy: str = "quality",
     max_concurrency: int = 3,
+    skip_docling: bool = False,
 ) -> Path:
-    """Run the extraction pipeline for one chapter and return the path of its primary Markdown file."""
+    """Run the extraction pipeline for one chapter and return the path of its primary Markdown file.
+
+    DUAL ROLE OF DOCLING VS. GEMINI VISION:
+    - Gemini Vision body_text is preferred for atomic OKF vault concepts because
+      Vision sees Private Use Area (PUA) action icons ([1 Action], [Reaction], [Opportunity])
+      and visual multi-column table boundaries directly.
+    - Docling provides the full-chapter linear Markdown ground truth (<Chapter> - DOCLING.md),
+      handles denylisted reference chapters (Glossary, Index), and acts as a layout
+      fallback if Gemini ever omits body_text.
+    - When --skip-docling is enabled and the chapter is a substantive chapter processed
+      by Gemini Vision, Docling OCR conversion is skipped to save local CPU/GPU compute.
+    """
     stem = chap.path.stem
     docling_md = tagged_md_path(md_out_dir, stem, DOCLING_TAG)
+    gemini_md = tagged_md_path(md_out_dir, stem, GEMINI_TAG)
 
-    # Phase 1: Docling Ground Truth Extraction
-    print("  -> Phase 1: Docling Extraction (Ground Truth & Lore)")
-    if docling_md.exists() and not force:
-        print(f"       -> Skipping (already exists): {docling_md.name}")
+    should_run_docling = not (skip_docling and chap.mechanics and not docling_only)
+
+    if should_run_docling:
+        # Phase 1: Docling Ground Truth Extraction
+        print("  -> Phase 1: Docling Extraction (Ground Truth & Lore)")
+        if docling_md.exists() and not force:
+            print(f"       -> Skipping (already exists): {docling_md.name}")
+        else:
+            convert_pdf(chap.path, docling_md, converter=converter.get(), force=force)
+
+        # Apply inline symbol and glyph patches to the docling chapter file
+        patch_file(docling_md)
     else:
-        convert_pdf(chap.path, docling_md, converter=converter.get(), force=force)
-
-    # Apply inline symbol and glyph patches to the docling chapter file
-    patch_file(docling_md)
+        print("  -> Phase 1: Skipping Docling Extraction (--skip-docling enabled)")
 
     # Phase 2 & 3: Async Gemini Vision & OKF Concept Shredding
     if chap.mechanics and not docling_only:
-        gemini_md = tagged_md_path(md_out_dir, stem, GEMINI_TAG)
         prompt_label = getattr(chap, "mode", "mechanics").capitalize()
         print(f"  -> Phase 2: Async Gemini Vision Extraction (Mode: {prompt_label})")
         if gemini_md.exists() and not force:
@@ -196,7 +244,7 @@ async def process_chapter_async(
 
         print("  -> Phase 3: Shredding into OKF Vault")
         shredded = shred_chapter(
-            docling_md_path=docling_md,
+            docling_md_path=docling_md if docling_md.exists() else None,
             gemini_output_path=gemini_md,
             vault_dir=vault_dir,
             default_sourcebook=sourcebook,
@@ -207,7 +255,7 @@ async def process_chapter_async(
     else:
         print("  -> Pipeline routing: Narrative chapter (bypassing Gemini & OKF shredding).")
 
-    return docling_md
+    return docling_md if docling_md.exists() else gemini_md
 
 
 def process_chapter(
@@ -221,6 +269,7 @@ def process_chapter(
     gemini_strategy: str = "quality",
     sourcebook: str = "TTRPG Rulebook",
     vault_dir: Path | None = None,
+    skip_docling: bool = False,
 ) -> Path:
     """Synchronous compatibility wrapper for single-chapter processing."""
     effective_vault = vault_dir or (md_out_dir.parent / "okf_vault")
@@ -235,6 +284,7 @@ def process_chapter(
             docling_only=docling_only,
             chunk_size=chunk_size,
             gemini_strategy=gemini_strategy,
+            skip_docling=skip_docling,
         )
     )
 
@@ -293,6 +343,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                 chunk_size=args.chunk_size,
                 gemini_strategy=args.gemini_strategy,
                 max_concurrency=args.concurrency,
+                skip_docling=getattr(args, "skip_docling", False),
             )
             print(f"  [SUCCESS] {chap.path.name} -> {final_md.name}")
         except Exception as e:  # noqa: BLE001
@@ -389,6 +440,11 @@ def main() -> None:
         "--docling-only",
         action="store_true",
         help="Skip the Gemini and OKF phases for every chapter (e.g. when out of API quota).",
+    )
+    parser.add_argument(
+        "--skip-docling",
+        action="store_true",
+        help="Skip local Docling OCR conversion for substantive chapters processed by Gemini Vision.",
     )
     parser.add_argument(
         "--chunk-size",

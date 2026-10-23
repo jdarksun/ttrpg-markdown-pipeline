@@ -124,3 +124,64 @@ def test_link_concept_mentions_first_mention_and_idempotent(tmp_path: Path):
     # Running a second time is idempotent and does not link the second occurrence
     linked_twice = link_concept_mentions(linked_once, brace_file, reg)
     assert linked_twice == linked_once
+
+
+def test_cross_link_vault_isolates_sourcebooks(tmp_path: Path):
+    vault = tmp_path / "okf_vault"
+    cosmere_rules = vault / "cosmere_rpg" / "rules"
+    cosmere_talents = vault / "cosmere_rpg" / "talents"
+    dcc_rules = vault / "dungeon_crawler_carl" / "rules"
+
+    cosmere_rules.mkdir(parents=True, exist_ok=True)
+    cosmere_talents.mkdir(parents=True, exist_ok=True)
+    dcc_rules.mkdir(parents=True, exist_ok=True)
+
+    cosmere_attack = cosmere_rules / "attack.md"
+    cosmere_attack.write_text("---\nname: Attack\ntype: rule\n---\n\nCosmere attack action.", encoding="utf-8")
+
+    cosmere_strike = cosmere_talents / "strike.md"
+    cosmere_strike.write_text(
+        "---\nname: Strike\ntype: talent\n---\n\nMake a standard Attack action.",
+        encoding="utf-8",
+    )
+
+    dcc_attack = dcc_rules / "attack.md"
+    dcc_attack.write_text("---\nname: Attack\ntype: rule\n---\n\nDCC attack action.", encoding="utf-8")
+
+    dcc_flurry = dcc_rules / "flurry.md"
+    dcc_flurry.write_text(
+        "---\nname: Flurry\ntype: rule\n---\n\nPerform a quick Attack.",
+        encoding="utf-8",
+    )
+
+    cross_link_vault(vault)
+
+    # Check cosmere link points internally to cosmere rules
+    strike_content = cosmere_strike.read_text(encoding="utf-8")
+    assert "[Attack](../rules/attack.md)" in strike_content
+    assert "dungeon_crawler_carl" not in strike_content
+
+    # Check DCC link points internally to DCC rules
+    flurry_content = dcc_flurry.read_text(encoding="utf-8")
+    assert "[Attack](attack.md)" in flurry_content
+    assert "cosmere_rpg" not in flurry_content
+
+
+def test_link_concept_mentions_with_parentheses(tmp_path: Path):
+    vault = tmp_path / "vault"
+    armors_dir = vault / "armors"
+    armors_dir.mkdir(parents=True, exist_ok=True)
+
+    armor_file = armors_dir / "armor_light.md"
+    armor_file.write_text("---\nname: Armor (Light)\ntype: armor\n---\n\nLight deflection.", encoding="utf-8")
+
+    rules_dir = vault / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+    rule_file = rules_dir / "equipment_training.md"
+    rule_file.write_text("---\nname: Equipment Training\ntype: rule\n---\n\nEmpty.", encoding="utf-8")
+
+    reg = build_concept_registry(vault)
+    text = "You gain proficiency with Armor (Light) and shields."
+    linked = link_concept_mentions(text, rule_file, reg)
+
+    assert "[Armor (Light)](../armors/armor_light.md)" in linked

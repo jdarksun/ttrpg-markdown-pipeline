@@ -6,13 +6,17 @@ requires-python = ">=3.11"
 dependencies = [
     "docling",
     "google-genai",
+    "pydantic>=2.0",
     "pymupdf",
     "pymupdf4llm",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
 test = [
+    "anyio>=4.0",
     "pytest>=8.0",
+    "types-PyYAML>=6.0",
 ]
 
 # Console commands installed by `pip install -e .` (usable from any directory)

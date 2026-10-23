@@ -18,6 +18,7 @@ class RegisteredConcept(NamedTuple):
     name: str
     file_path: Path
     slug: str
+    pattern: re.Pattern[str]
 
 
 def build_concept_registry(vault_dir: Path) -> dict[str, RegisteredConcept]:
@@ -43,20 +44,25 @@ def build_concept_registry(vault_dir: Path) -> dict[str, RegisteredConcept]:
                 if "name" in frontmatter:
                     raw_name = str(frontmatter["name"]).strip()
                     if raw_name:
+                        pat = re.compile(rf"(?<!\w)({re.escape(raw_name)})(?!\w)", re.IGNORECASE)
                         reg = RegisteredConcept(
                             name=raw_name,
                             file_path=md_file.resolve(),
                             slug=md_file.stem,
+                            pattern=pat,
                         )
                         registry[raw_name.lower()] = reg
 
                 if "node_id" in frontmatter and frontmatter.get("type") == "adventure_node":
                     node_id = str(frontmatter["node_id"]).strip()
                     if node_id:
+                        node_name = f"Node {node_id}"
+                        pat = re.compile(rf"(?<!\w)({re.escape(node_name)})(?!\w)", re.IGNORECASE)
                         node_reg = RegisteredConcept(
-                            name=f"Node {node_id}",
+                            name=node_name,
                             file_path=md_file.resolve(),
                             slug=md_file.stem,
+                            pattern=pat,
                         )
                         registry[f"node {node_id}".lower()] = node_reg
         except yaml.YAMLError:
@@ -121,8 +127,6 @@ def link_concept_mentions(
         if name in already_linked or rel_link in already_linked:
             continue
 
-        pattern = re.compile(rf"\b({re.escape(name)})\b", re.IGNORECASE)
-
         def replace_mention(m: re.Match[str], link: str = rel_link) -> str:
             nonlocal counter
             ph = f"\x00TOKEN_{counter}\x00"
@@ -130,7 +134,7 @@ def link_concept_mentions(
             counter += 1
             return ph
 
-        linked_text = pattern.sub(replace_mention, linked_text, count=1)
+        linked_text = target_concept.pattern.sub(replace_mention, linked_text, count=1)
 
     for ph, original_or_link in tokens.items():
         linked_text = linked_text.replace(ph, original_or_link)
@@ -138,12 +142,12 @@ def link_concept_mentions(
     return linked_text
 
 
-def cross_link_vault(vault_dir: Path) -> int:
-    """Crawls vault_dir, cross-links all concept mentions in body_text, and returns modified count."""
-    registry = build_concept_registry(vault_dir)
+def _cross_link_directory(dir_path: Path) -> int:
+    """Performs cross-linking within a single sourcebook or flat vault directory."""
+    registry = build_concept_registry(dir_path)
     modified_count = 0
 
-    for md_file in vault_dir.rglob("*.md"):
+    for md_file in sorted(dir_path.rglob("*.md")):
         content = md_file.read_text(encoding="utf-8")
         if not content.startswith("---\n"):
             continue
@@ -161,3 +165,18 @@ def cross_link_vault(vault_dir: Path) -> int:
             modified_count += 1
 
     return modified_count
+
+
+def cross_link_vault(vault_dir: Path) -> int:
+    """Crawls vault_dir, cross-links concept mentions in body_text per sourcebook, and returns modified count."""
+    if not vault_dir.exists():
+        return 0
+
+    sourcebook_dirs = [
+        d for d in sorted(vault_dir.iterdir()) if d.is_dir() and any(sub.is_dir() for sub in d.iterdir())
+    ]
+
+    if sourcebook_dirs:
+        return sum(_cross_link_directory(sb_dir) for sb_dir in sourcebook_dirs)
+
+    return _cross_link_directory(vault_dir)

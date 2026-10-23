@@ -2,6 +2,26 @@
 
 import re
 
+# ==============================================================================
+# FIDELITY-FIRST DENYLIST ARCHITECTURE
+# ==============================================================================
+# TTRPG rulebooks frequently interleave critical mechanics, character creation
+# tables, GM adjudication procedures, and worldbuilding lore inside chapters with
+# non-obvious titles (e.g. "Introduction", "Gamemastering", "The Next Step").
+#
+# Rather than risking dropped rules through a restrictive title allowlist, the
+# pipeline uses a metadata-only denylist (CHAPTER_DENYLIST) to exclude pure front/back
+# matter (Credits, Table of Contents, Index, Character Sheets). All non-denylisted
+# chapters route to chap_mode = "mechanics" (UNIFIED_PROMPT) by default, extracting
+# both mechanical rules and worldbuilding entities with 0% missed rules.
+#
+# ROLE OF KEYWORD SETS:
+# - MECHANICS_KEYWORDS, LORE_KEYWORDS, and ADVENTURE_KEYWORDS are used ONLY when
+#   specialized modes (--include-lore or --adventure-mode) are explicitly passed to
+#   route pure setting or adventure module chapters to specialized prompts (LORE_PROMPT
+#   or ADVENTURE_PROMPT) without overriding explicit mechanics chapters.
+# ==============================================================================
+
 # Chapters matching these terms are pure front/back metadata and skip Gemini Vision & OKF shredding
 CHAPTER_DENYLIST = [
     "credits",
@@ -193,13 +213,13 @@ Strict Icon Translation Rules for body_text & activation:
 UNIVERSAL_INLINE_FIXES = {
     # Stances & Actions
     r"enter as :": "enter as [Free Action]:",
-    r"enter another stance you know as ▷": "enter another stance you know as [Free Action]",
+    r"enter another stance you know as \u25b7": "enter another stance you know as [Free Action]",  # \u25b7: ▷
     r"enter another stance you know as :": "enter another stance you know as [Free Action]:",
     r"Grapple or Shove as \(instead of\)": "Grapple or Shove as [1 Action] (instead of [2 Actions])",
     # Reactions
-    r"without spending ↻": "without spending [Reaction]",
-    r"gain an additional ↻": "gain an additional [Reaction]",
-    r"spending ↻": "spending [Reaction]",
+    r"without spending \u21bb": "without spending [Reaction]",  # \u21bb: ↻
+    r"gain an additional \u21bb": "gain an additional [Reaction]",  # \u21bb: ↻
+    r"spending \u21bb": "spending [Reaction]",  # \u21bb: ↻
     # Action Grants & Movement
     r"spend an additional to Disengage": "spend an additional [1 Action] to Disengage",
     r"must spend an additional when they draw": "must spend an additional [1 Action] when they draw",
@@ -228,7 +248,7 @@ UNIVERSAL_INLINE_FIXES = {
     ),
     r"gain for tapping your": "gain [1 Action] for tapping your",
     # Chapter 7 Specifics (Items, Equipment & Traits)
-    r"action as ▷ to draw": "action as [Free Action] to draw",
+    r"action as \u25b7 to draw": "action as [Free Action] to draw",  # \u25b7: ▷
     r"can spend to cause it to break": "can spend [Complication] to cause it to break",
     r"GM can spend to cause your armor": "GM can spend [Complication] to cause your armor",
     r"can spend to cause the target": "can spend [Opportunity] to cause the target",
@@ -243,7 +263,7 @@ UNIVERSAL_INLINE_FIXES = {
     r"\|\s*Suppressor\s*\|\s*ammunition from that chamber\.\s*": "| Suppressor | ",
     # Chapter 8 Specifics (Organizations & Hemalurgy)
     r"Implant Spike \(3\)": "Implant Spike [3 Actions]",
-    r"Remove Spike \(▶\)": "Remove Spike [1 Action]",
+    r"Remove Spike \(\u25b6\)": "Remove Spike [1 Action]",  # \u25b6: ▶
     r"can spend to appeal to their own sense": "can spend [Opportunity] to appeal to their own sense",
     r"can spend to lessen your grip": "can spend [Complication] to lessen your grip",
 }

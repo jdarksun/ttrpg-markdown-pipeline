@@ -154,7 +154,7 @@ def clean_extraction_artifacts(text: str) -> str:
 
     # Strip standalone bullet and optional page number footers (e.g. '● 48', '●\n\n48', '• 12', or standalone '●')
     cleaned = re.sub(
-        r"^[ \t]*[●•](?:[ \t]+|\r?\n[ \t]*)*(?:\d+)?[ \t]*$\n?",
+        r"^[ \t]*[\u25cf\u2022](?:[ \t]+|\r?\n[ \t]*)*(?:\d+)?[ \t]*$\n?",  # \u25cf: ●, \u2022: •
         "",
         cleaned,
         flags=re.MULTILINE,
@@ -297,7 +297,16 @@ def split_mechanics_and_examples(text: str) -> tuple[str, str | None]:
 
 
 def instantiate_okf_concept(item_dict: dict[str, Any], docling_body: str | None = None) -> OKFConcept:
-    """Instantiates the specialized OKF Pydantic model according to 'type'."""
+    """Instantiates the specialized OKF Pydantic model according to 'type'.
+
+    DUAL ROLE OF GEMINI VISION VS. DOCLING:
+    - Gemini Vision body_text is preferred for atomic OKF vault concepts because
+      Vision sees Private Use Area (PUA) action icons ([1 Action], [Reaction], [Opportunity])
+      and visual multi-column table boundaries directly.
+    - Docling provides the full-chapter linear Markdown ground truth (<Chapter> - DOCLING.md),
+      handles denylisted reference chapters (Glossary, Index), and acts as layout fallback
+      if Gemini ever omits body_text.
+    """
     c_type = str(item_dict.get("type", "rule")).lower()
     merged_dict = dict(item_dict)
 

@@ -875,7 +875,7 @@ def extract_pdf(
             for start_idx, end_idx in chunk_ranges:
                 chunk_file = chunk_file_for(cache_dir, start_idx, end_idx)
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                label = f"[{start_idx + 1:02d}–{end_idx:02d}/{total_pages}]"
+                label = f"[{start_idx + 1:02d}-{end_idx:02d}/{total_pages}]"
 
                 if chunk_file.exists():
                     cached_text = chunk_file.read_text(encoding="utf-8")

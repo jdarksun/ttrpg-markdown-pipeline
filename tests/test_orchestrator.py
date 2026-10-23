@@ -262,3 +262,29 @@ def test_process_chapter_prompt_routing(tmp_path: Path):
         mock_extract_async.assert_called_once()
         _, kwargs = mock_extract_async.call_args
         assert kwargs["prompt"] == DEFAULT_PROMPT
+
+
+def test_process_chapter_skip_docling(tmp_path: Path):
+    pdf = tmp_path / "01-Combat.pdf"
+    pdf.write_text("dummy", encoding="utf-8")
+    md_dir = tmp_path / "md"
+    md_dir.mkdir()
+    converter = MagicMock()
+
+    chap = Chapter(path=pdf, title="Combat Rules", mechanics=True, mode="mechanics")
+    with (
+        patch("ttrpg_markdown_pipeline.orchestrator.convert_pdf") as mock_convert,
+        patch("ttrpg_markdown_pipeline.orchestrator.extract_pdf_async") as mock_extract_async,
+        patch("ttrpg_markdown_pipeline.orchestrator.shred_chapter") as mock_shred,
+        patch("ttrpg_markdown_pipeline.orchestrator.patch_file"),
+    ):
+        mock_extract_async.side_effect = lambda src, dst, **kwargs: dst.write_text("gemini", encoding="utf-8") or dst
+        mock_shred.return_value = []
+        result = process_chapter(chap, md_dir, converter, skip_docling=True)
+
+        mock_convert.assert_not_called()
+        mock_extract_async.assert_called_once()
+        mock_shred.assert_called_once()
+        _, kwargs = mock_shred.call_args
+        assert kwargs["docling_md_path"] is None
+        assert result.name == "01-Combat - GEMINI.md"

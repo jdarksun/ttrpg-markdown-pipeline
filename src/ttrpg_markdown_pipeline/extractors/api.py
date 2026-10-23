@@ -290,7 +290,7 @@ async def _process_chunk_async(
 ) -> str:
     """Processes a single slice of pages asynchronously with caching and concurrency control."""
     chunk_file = chunk_file_for(cache_dir, start_idx, end_idx)
-    label = f"[{start_idx + 1:02d}–{end_idx:02d}/{total_pages}]"
+    label = f"[{start_idx + 1:02d}-{end_idx:02d}/{total_pages}]"
 
     if chunk_file.exists():
         cached_text = chunk_file.read_text(encoding="utf-8")
@@ -371,7 +371,7 @@ async def _process_chunk_async(
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 print(
                     f"[{ts}] {label} [!] Chunk failed across models ({run_err}). "
-                    f"Adaptive-splitting pages {start_idx + 1}–{end_idx} in half..."
+                    f"Adaptive-splitting pages {start_idx + 1}-{end_idx} in half..."
                 )
                 mid_idx = (start_idx + end_idx) // 2
                 text_a = await _process_chunk_async(
