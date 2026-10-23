@@ -24,7 +24,7 @@ def build_concept_registry(vault_dir: Path) -> dict[str, RegisteredConcept]:
     """Scans vault_dir for .md files and indexes concepts by name and lowercase name."""
     registry: dict[str, RegisteredConcept] = {}
 
-    for md_file in vault_dir.rglob("*.md"):
+    for md_file in sorted(vault_dir.rglob("*.md")):
         try:
             content = md_file.read_text(encoding="utf-8")
         except OSError:
@@ -97,6 +97,12 @@ def link_concept_mentions(
     tokens: dict[str, str] = {}
     counter = 0
 
+    # Track already-linked targets or concept labels so repeated runs are idempotent
+    already_linked: set[str] = set()
+    for existing_match in re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", body_text):
+        already_linked.add(existing_match.group(1).strip().lower())
+        already_linked.add(existing_match.group(2).strip())
+
     def protect_match(m: re.Match[str]) -> str:
         nonlocal counter
         ph = f"\x00TOKEN_{counter}\x00"
@@ -112,6 +118,9 @@ def link_concept_mentions(
         target_concept = registry[name]
         rel_link = compute_relative_link(source_file, target_concept.file_path)
 
+        if name in already_linked or rel_link in already_linked:
+            continue
+
         pattern = re.compile(rf"\b({re.escape(name)})\b", re.IGNORECASE)
 
         def replace_mention(m: re.Match[str], link: str = rel_link) -> str:
@@ -121,7 +130,7 @@ def link_concept_mentions(
             counter += 1
             return ph
 
-        linked_text = pattern.sub(replace_mention, linked_text)
+        linked_text = pattern.sub(replace_mention, linked_text, count=1)
 
     for ph, original_or_link in tokens.items():
         linked_text = linked_text.replace(ph, original_or_link)

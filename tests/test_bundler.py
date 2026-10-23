@@ -258,3 +258,19 @@ def test_bundle_vault_includes_campaign(tmp_path: Path):
 
     assert "Stormlight_Solo_All_Adventure_Nodes.md" in names
     assert "Stormlight_Solo_GM_Campaign_Guide.md" in names
+
+
+def test_format_concept_for_bundle_strips_relative_md_links():
+    atomic_md = (
+        "---\n"
+        "name: Brace\n"
+        "type: rule\n"
+        "---\n\n"
+        "### Mechanics\n\n"
+        "You hide behind [cover](cover.md) or use a [shield](../weapons/shield.md)."
+    )
+    formatted = format_concept_for_bundle(atomic_md)
+    assert "**cover**" in formatted
+    assert "**shield**" in formatted
+    assert "(cover.md)" not in formatted
+    assert "(../weapons/shield.md)" not in formatted

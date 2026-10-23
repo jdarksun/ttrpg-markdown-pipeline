@@ -47,10 +47,12 @@ def format_concept_for_bundle(atomic_markdown: str) -> str:
 
             blocks = [f"## {concept_name}", f"```yaml\n{yaml_raw}\n```"]
             if body_raw:
-                if not body_raw.startswith("### "):
-                    blocks.append(f"### Mechanics\n\n{body_raw}")
+                # Replace relative .md file links with clean bold callouts for monolithic bundles
+                clean_body = re.sub(r"\[([^\]]+)\]\((?!https?://)[^)]+\.md\)", r"**\1**", body_raw)
+                if not clean_body.startswith("### "):
+                    blocks.append(f"### Mechanics\n\n{clean_body}")
                 else:
-                    blocks.append(body_raw)
+                    blocks.append(clean_body)
 
             return "\n\n".join(blocks)
 

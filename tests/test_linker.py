@@ -100,3 +100,27 @@ def test_link_concept_mentions_no_double_linking(tmp_path: Path):
     assert "`Disengage`" in result
     # "heal" should be linked
     assert "[heal](heal.md)" in result
+
+
+def test_link_concept_mentions_first_mention_and_idempotent(tmp_path: Path):
+    vault = tmp_path / "vault"
+    rules_dir = vault / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+
+    cover_file = rules_dir / "cover.md"
+    cover_file.write_text("---\nname: Cover\ntype: rule\n---\n\nProtection.", encoding="utf-8")
+
+    brace_file = rules_dir / "brace.md"
+    brace_file.write_text(
+        "---\nname: Brace\ntype: rule\n---\n\nYou hide behind cover. While behind cover, attacks have disadvantage.",
+        encoding="utf-8",
+    )
+
+    reg = build_concept_registry(vault)
+    text = "You hide behind cover. While behind cover, attacks have disadvantage."
+    linked_once = link_concept_mentions(text, brace_file, reg)
+    assert linked_once == "You hide behind [cover](cover.md). While behind cover, attacks have disadvantage."
+
+    # Running a second time is idempotent and does not link the second occurrence
+    linked_twice = link_concept_mentions(linked_once, brace_file, reg)
+    assert linked_twice == linked_once
