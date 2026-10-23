@@ -232,20 +232,21 @@ def test_discover_model_pool_strategies():
 
     _MODEL_POOL_CACHE.clear()
     quality_pool = discover_model_pool(mock_client, strategy="quality")
+    # Retired 2.x models (like gemini-2.5-flash) are filtered out by MIN_SUPPORTED_MAJOR_VERSION
+    assert "gemini-2.5-flash" not in quality_pool
     assert quality_pool == [
         "gemini-3.8-flash",
-        "gemini-2.5-flash",
         "gemini-3.5-flash-lite",
         "gemini-3.1-flash-lite",
     ]
 
     _MODEL_POOL_CACHE.clear()
     quota_pool = discover_model_pool(mock_client, strategy="quota")
+    assert "gemini-2.5-flash" not in quota_pool
     assert quota_pool == [
         "gemini-3.5-flash-lite",
         "gemini-3.1-flash-lite",
         "gemini-3.8-flash",
-        "gemini-2.5-flash",
     ]
 
     m_pro = MagicMock(supported_actions=["generateContent"])
@@ -384,3 +385,42 @@ def test_generate_with_fallback_rejects_max_tokens_and_retries():
     assert text == '[{"name": "Rule", "body_text": "Complete"}]'
     assert model == "gemini-3.8-flash"
     assert client.models.generate_content.call_count == 2
+
+
+def test_quota_state_persistence(tmp_path: Path):
+    from ttrpg_markdown_pipeline.extractors.gemini import (
+        _EXHAUSTED_MODELS,
+        load_persisted_quota_state,
+        record_model_exhaustion,
+    )
+
+    state_file = tmp_path / "test_quota_state.json"
+    _EXHAUSTED_MODELS.clear()
+
+    # Record model A exhausted
+    is_new = record_model_exhaustion(
+        "gemini-3.8-pro",
+        "daily_quota_exhausted",
+        retry_seconds=3600.0,
+        reason="Rate limit exceeded",
+        path=state_file,
+    )
+    assert is_new is True
+    assert "gemini-3.8-pro" in _EXHAUSTED_MODELS
+    assert state_file.exists()
+
+    # Second call returns False (already exhausted)
+    is_new_again = record_model_exhaustion(
+        "gemini-3.8-pro",
+        "daily_quota_exhausted",
+        path=state_file,
+    )
+    assert is_new_again is False
+
+    # Simulate fresh session loading state
+    _EXHAUSTED_MODELS.clear()
+    assert "gemini-3.8-pro" not in _EXHAUSTED_MODELS
+
+    loaded = load_persisted_quota_state(state_file)
+    assert "gemini-3.8-pro" in loaded
+    assert "gemini-3.8-pro" in _EXHAUSTED_MODELS

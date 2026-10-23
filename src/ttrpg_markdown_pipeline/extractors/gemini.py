@@ -1,5 +1,8 @@
 import argparse
+import contextlib
 import json
+import os
+import random
 import re
 import sys
 import tempfile
@@ -16,21 +19,24 @@ from google.genai import errors, types
 from ttrpg_markdown_pipeline.common import GEMINI_TAG, clean_path, load_env_file, resolve_md_output
 from ttrpg_markdown_pipeline.rules.cosmere import DEFAULT_PROMPT
 
+MIN_SUPPORTED_MAJOR_VERSION = 3
+
 # Default static fallback if API dynamic discovery is unavailable
 DEFAULT_DESIRABILITY_PATH = [
     "gemini-3.8-flash",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
-    "gemini-2.5-flash",
+    "gemini-3-flash-preview",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-2.5-flash-lite",
+    "gemini-3.1-flash-lite-preview",
 ]
 DESIRABILITY_PATH = DEFAULT_DESIRABILITY_PATH
 
 _MODEL_POOL_CACHE: dict[str, list[str]] = {}
 _EXHAUSTED_MODELS: set[str] = set()
+QUOTA_STATE_FILE = Path(".gemini_quota_state.json")
 
 CHUNK_BOUNDARY_SENTINEL = "\n\n<!-- OKF_CHUNK_BOUNDARY -->\n\n"
 
@@ -350,17 +356,22 @@ def discover_model_pool(client: genai.Client | None = None, strategy: str = "qua
     try:
         pattern = re.compile(r"^gemini-(\d+(?:\.\d+)?)-(pro|flash(?:-lite)?)(?:-(preview))?$")
         matches: list[tuple[str, str, tuple[int, ...], int]] = []
+        denylist = {x.strip() for x in os.getenv("GEMINI_MODEL_DENYLIST", "").split(",") if x.strip()}
 
         for m in client.models.list():
             if not m.name:
                 continue
             clean = m.name.removeprefix("models/")
+            if clean in denylist:
+                continue
             res = pattern.match(clean)
             if res and "generateContent" in getattr(m, "supported_actions", []):
                 ver_str, flavor, preview_tag = res.groups()
                 parts = tuple(int(p) for p in ver_str.split("."))
                 if len(parts) == 1:
                     parts = (parts[0], 0)
+                if parts[0] < MIN_SUPPORTED_MAJOR_VERSION:
+                    continue
                 is_stable = 0 if preview_tag else 1
                 matches.append((clean, flavor, parts, is_stable))
 
@@ -474,6 +485,188 @@ def parse_api_error_diagnostics(exc: BaseException) -> dict[str, Any]:
         "retry_seconds": retry_seconds,
         "short_message": short_message,
     }
+
+
+def load_persisted_quota_state(path: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Loads active exhausted model state from disk into _EXHAUSTED_MODELS."""
+    state_file = path or QUOTA_STATE_FILE
+    if not state_file.exists():
+        return {}
+    try:
+        raw = json.loads(state_file.read_text(encoding="utf-8"))
+        now = time.time()
+        valid_state: dict[str, dict[str, Any]] = {}
+        for model, info in raw.items():
+            if isinstance(info, dict) and info.get("expires_at", 0) > now:
+                valid_state[model] = info
+                _EXHAUSTED_MODELS.add(model)
+        return valid_state
+    except Exception:
+        return {}
+
+
+def record_model_exhaustion(
+    model: str,
+    error_type: str,
+    retry_seconds: float | None = None,
+    reason: str = "",
+    path: Path | None = None,
+) -> bool:
+    """Marks model exhausted, calculates expiration TTL, and persists state.
+
+    Returns True if model was newly added, False if already exhausted.
+    """
+    newly_added = model not in _EXHAUSTED_MODELS
+    _EXHAUSTED_MODELS.add(model)
+
+    if "PYTEST_CURRENT_TEST" in os.environ and path is None:
+        return newly_added
+
+    state_file = path or QUOTA_STATE_FILE
+    try:
+        state: dict[str, Any] = {}
+        if state_file.exists():
+            with contextlib.suppress(Exception):
+                state = json.loads(state_file.read_text(encoding="utf-8"))
+        ttl = (
+            86400.0 * 7
+            if error_type in ("not_found_or_deprecated_404", "zero_quota_limit")
+            else (retry_seconds or 3600.0)
+        )
+        state[model] = {
+            "reason": reason,
+            "error_type": error_type,
+            "recorded_at": time.time(),
+            "expires_at": time.time() + ttl,
+        }
+        state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return newly_added
+
+
+def handle_generation_api_error(
+    exc: errors.APIError,
+    model: str,
+    model_pool: list[str],
+    idx: int,
+    attempt: int,
+    *,
+    context: str = "",
+    report: RunReport | None = None,
+) -> tuple[str, float]:
+    """Classifies an APIError, updates quota/report state, and returns (action, backoff_seconds).
+
+    action is either 'cascade' (move to next model in pool) or 'retry' (retry current model).
+    """
+    active_report = report or _GLOBAL_RUN_REPORT
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    diag = parse_api_error_diagnostics(exc)
+    err_type = diag["error_type"]
+    short_msg = diag["short_message"]
+
+    if is_daily_quota_exhausted(exc):
+        newly_exhausted = record_model_exhaustion(
+            model, err_type, retry_seconds=diag.get("retry_seconds"), reason=short_msg
+        )
+        next_model = _next_available_model(model_pool, idx)
+        print(f"[{ts}] [!] Daily/zero quota exhausted for {model} ({short_msg}). Cascading to {next_model}...")
+        active_report.record_error(
+            timestamp=ts,
+            context=context,
+            model=model,
+            error_type=err_type,
+            status_code=diag["status_code"],
+            quota_id=diag["quota_id"],
+            quota_limit=diag["quota_limit"],
+            retry_delay=diag["retry_delay"],
+            message=short_msg,
+            resolution=f"Marked exhausted; cascaded to {next_model}",
+        )
+        if newly_exhausted:
+            active_report.record_switch(
+                timestamp=ts,
+                context=context,
+                from_model=model,
+                to_model=next_model,
+                error_type=err_type,
+                reason=short_msg,
+                marked_exhausted=True,
+            )
+        return "cascade", 0.0
+
+    if exc.code == 404 or (exc.message and "no longer available" in exc.message.lower()):
+        newly_exhausted = record_model_exhaustion(model, err_type, reason=short_msg)
+        next_model = _next_available_model(model_pool, idx)
+        print(f"[{ts}] [!] {model} unavailable or deprecated ({short_msg}). Cascading to {next_model}...")
+        active_report.record_error(
+            timestamp=ts,
+            context=context,
+            model=model,
+            error_type=err_type,
+            status_code=diag["status_code"],
+            quota_id=diag["quota_id"],
+            quota_limit=diag["quota_limit"],
+            retry_delay=diag["retry_delay"],
+            message=short_msg,
+            resolution=f"Marked unavailable; cascaded to {next_model}",
+        )
+        if newly_exhausted:
+            active_report.record_switch(
+                timestamp=ts,
+                context=context,
+                from_model=model,
+                to_model=next_model,
+                error_type=err_type,
+                reason=short_msg,
+                marked_exhausted=True,
+            )
+        return "cascade", 0.0
+
+    if attempt == 5:
+        next_model = _next_available_model(model_pool, idx)
+        print(f"[{ts}] [!] {model} unavailable after 5 attempts ({short_msg}). Cascading to {next_model}...")
+        active_report.record_error(
+            timestamp=ts,
+            context=context,
+            model=model,
+            error_type=err_type,
+            status_code=diag["status_code"],
+            quota_id=diag["quota_id"],
+            quota_limit=diag["quota_limit"],
+            retry_delay=diag["retry_delay"],
+            message=short_msg,
+            resolution=f"Max retries (5/5) reached; cascaded to {next_model}",
+        )
+        active_report.record_switch(
+            timestamp=ts,
+            context=context,
+            from_model=model,
+            to_model=next_model,
+            error_type=err_type,
+            reason=f"Failed after 5/5 attempts: {short_msg}",
+            marked_exhausted=False,
+        )
+        return "cascade", 0.0
+
+    default_backoff = min(attempt * 12 if exc.code in (429, 503) else attempt * 5, 60)
+    suggested_wait = int(diag["retry_seconds"]) + 2 if diag.get("retry_seconds") else 0
+    jitter = random.uniform(0.5, 3.0)
+    backoff = min(max(default_backoff, suggested_wait) + jitter, 90.0)
+    print(f"[{ts}] [!] Transient {model} error ({err_type}: {short_msg}). Retrying in {backoff:.1f}s ({attempt}/5)...")
+    active_report.record_error(
+        timestamp=ts,
+        context=context,
+        model=model,
+        error_type=err_type,
+        status_code=diag["status_code"],
+        quota_id=diag["quota_id"],
+        quota_limit=diag["quota_limit"],
+        retry_delay=diag["retry_delay"],
+        message=short_msg,
+        resolution=f"Retrying in {backoff:.1f}s (attempt {attempt}/5)",
+    )
+    return "retry", backoff
 
 
 def _next_available_model(model_pool: list[str], current_idx: int) -> str:
@@ -592,114 +785,17 @@ def generate_with_fallback(
                 )
                 break
             except errors.APIError as e:
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                diag = parse_api_error_diagnostics(e)
-                err_type = diag["error_type"]
-                short_msg = diag["short_message"]
-
-                if is_daily_quota_exhausted(e):
-                    _EXHAUSTED_MODELS.add(model)
-                    next_model = _next_available_model(model_pool, idx)
-                    print(
-                        f"[{ts}] [!] Daily/zero quota exhausted for {model} ({short_msg}). Cascading to {next_model}..."
-                    )
-                    active_report.record_error(
-                        timestamp=ts,
-                        context=context,
-                        model=model,
-                        error_type=err_type,
-                        status_code=diag["status_code"],
-                        quota_id=diag["quota_id"],
-                        quota_limit=diag["quota_limit"],
-                        retry_delay=diag["retry_delay"],
-                        message=short_msg,
-                        resolution=f"Marked exhausted; cascaded to {next_model}",
-                    )
-                    active_report.record_switch(
-                        timestamp=ts,
-                        context=context,
-                        from_model=model,
-                        to_model=next_model,
-                        error_type=err_type,
-                        reason=short_msg,
-                        marked_exhausted=True,
-                    )
-                    break  # Break inner loop to trigger next model in pool
-
-                if e.code == 404 or (e.message and "no longer available" in e.message.lower()):
-                    _EXHAUSTED_MODELS.add(model)
-                    next_model = _next_available_model(model_pool, idx)
-                    print(f"[{ts}] [!] {model} unavailable or deprecated ({short_msg}). Cascading to {next_model}...")
-                    active_report.record_error(
-                        timestamp=ts,
-                        context=context,
-                        model=model,
-                        error_type=err_type,
-                        status_code=diag["status_code"],
-                        quota_id=diag["quota_id"],
-                        quota_limit=diag["quota_limit"],
-                        retry_delay=diag["retry_delay"],
-                        message=short_msg,
-                        resolution=f"Marked unavailable; cascaded to {next_model}",
-                    )
-                    active_report.record_switch(
-                        timestamp=ts,
-                        context=context,
-                        from_model=model,
-                        to_model=next_model,
-                        error_type=err_type,
-                        reason=short_msg,
-                        marked_exhausted=True,
-                    )
-                    break
-
-                if attempt == 5:
-                    next_model = _next_available_model(model_pool, idx)
-                    print(
-                        f"[{ts}] [!] {model} unavailable after 5 attempts ({short_msg}). Cascading to {next_model}..."
-                    )
-                    active_report.record_error(
-                        timestamp=ts,
-                        context=context,
-                        model=model,
-                        error_type=err_type,
-                        status_code=diag["status_code"],
-                        quota_id=diag["quota_id"],
-                        quota_limit=diag["quota_limit"],
-                        retry_delay=diag["retry_delay"],
-                        message=short_msg,
-                        resolution=f"Max retries (5/5) reached; cascaded to {next_model}",
-                    )
-                    active_report.record_switch(
-                        timestamp=ts,
-                        context=context,
-                        from_model=model,
-                        to_model=next_model,
-                        error_type=err_type,
-                        reason=f"Failed after 5/5 attempts: {short_msg}",
-                        marked_exhausted=False,
-                    )
-                    break
-
-                default_backoff = min(attempt * 12 if e.code in (429, 503) else attempt * 5, 60)
-                suggested_wait = int(diag["retry_seconds"]) + 2 if diag["retry_seconds"] else 0
-                backoff = min(max(default_backoff, suggested_wait), 90)
-                print(
-                    f"[{ts}] [!] Transient {model} error ({err_type}: {short_msg}). "
-                    f"Retrying in {backoff}s ({attempt}/5)..."
-                )
-                active_report.record_error(
-                    timestamp=ts,
-                    context=context,
+                action, backoff = handle_generation_api_error(
+                    e,
                     model=model,
-                    error_type=err_type,
-                    status_code=diag["status_code"],
-                    quota_id=diag["quota_id"],
-                    quota_limit=diag["quota_limit"],
-                    retry_delay=diag["retry_delay"],
-                    message=short_msg,
-                    resolution=f"Retrying in {backoff}s (attempt {attempt}/5)",
+                    model_pool=model_pool,
+                    idx=idx,
+                    attempt=attempt,
+                    context=context,
+                    report=active_report,
                 )
+                if action == "cascade":
+                    break
                 time.sleep(backoff)
 
     raise RuntimeError("All models in the desirability path failed or exhausted quota.")

@@ -78,3 +78,21 @@ async def test_extract_pdf_async(tmp_path: Path):
     assert out_md.exists()
     content = out_md.read_text(encoding="utf-8")
     assert "Async Talent" in content
+
+
+@pytest.mark.anyio
+async def test_generate_with_fallback_async_probe_locking():
+    from ttrpg_markdown_pipeline.extractors.api import _VERIFIED_WORKING_MODELS
+
+    _EXHAUSTED_MODELS.clear()
+    _VERIFIED_WORKING_MODELS.clear()
+
+    client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.text = '[{"name": "Rule"}]'
+    client.aio.models.generate_content = AsyncMock(return_value=mock_resp)
+
+    text, model = await generate_with_fallback_async(client, ["content"], ["gemini-3.8-flash"], require_json=True)
+    assert text == '[{"name": "Rule"}]'
+    assert model == "gemini-3.8-flash"
+    assert "gemini-3.8-flash" in _VERIFIED_WORKING_MODELS

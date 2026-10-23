@@ -25,11 +25,14 @@ from ttrpg_markdown_pipeline.extractors.gemini import (
     compute_chunk_ranges,
     discover_model_pool,
     get_run_report,
-    is_daily_quota_exhausted,
+    handle_generation_api_error,
     is_valid_json_chunk,
-    parse_api_error_diagnostics,
+    load_persisted_quota_state,
 )
 from ttrpg_markdown_pipeline.rules.cosmere import DEFAULT_PROMPT
+
+_VERIFIED_WORKING_MODELS: set[str] = set()
+_MODEL_PROBE_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 async def generate_with_fallback_async(
@@ -42,6 +45,7 @@ async def generate_with_fallback_async(
     require_json: bool = False,
 ) -> tuple[str, str]:
     """Tries async generation along the desirability path, cascading on exhaustion or failure."""
+    load_persisted_quota_state()
     active_report = report or get_run_report()
 
     for idx, model in enumerate(model_pool):
@@ -50,6 +54,121 @@ async def generate_with_fallback_async(
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] Attempting async generation with {model}...")
+
+        # Guard unverified models with single-flight probe lock across concurrent workers
+        if model not in _VERIFIED_WORKING_MODELS:
+            probe_lock = _MODEL_PROBE_LOCKS.setdefault(model, asyncio.Lock())
+            async with probe_lock:
+                if model in _EXHAUSTED_MODELS:
+                    continue
+                # Single-flight probe on unverified model
+                for attempt in range(1, 6):
+                    active_report.record_attempt(model)
+                    t0 = time.monotonic()
+                    config_to_use = DEFAULT_GENERATION_CONFIG
+                    if attempt > 1:
+                        config_to_use = types.GenerateContentConfig(
+                            temperature=0.1,
+                            max_output_tokens=65536,
+                            response_mime_type="application/json",
+                            thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                        )
+                    try:
+                        response = await client.aio.models.generate_content(
+                            model=model,
+                            contents=contents,
+                            config=config_to_use,
+                        )
+                        latency_s = time.monotonic() - t0
+                        if response.text:
+                            usage = active_report.record_success(model, response, latency_s=latency_s)
+                            is_max_tokens = usage.get("finish_reason") == "MAX_TOKENS"
+                            is_invalid_json = require_json and not is_valid_json_chunk(response.text)
+
+                            if is_max_tokens or is_invalid_json:
+                                err_type = "truncated_max_tokens" if is_max_tokens else "invalid_json_output"
+                                ts_err = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                print(
+                                    f"[{ts_err}] [!] {model} returned {err_type} (finish={usage.get('finish_reason')})."
+                                )
+                                if attempt == 1:
+                                    print(f"[{ts_err}] Retrying {model} with tighter thinking budget (1024)...")
+                                    continue
+
+                                next_model = _next_available_model(model_pool, idx)
+                                active_report.record_error(
+                                    timestamp=ts_err,
+                                    context=context,
+                                    model=model,
+                                    error_type=err_type,
+                                    status_code=None,
+                                    quota_id=None,
+                                    quota_limit=None,
+                                    retry_delay=None,
+                                    message=f"Model output failed validation: {err_type}",
+                                    resolution=f"Cascaded to {next_model}",
+                                )
+                                active_report.record_switch(
+                                    timestamp=ts_err,
+                                    context=context,
+                                    from_model=model,
+                                    to_model=next_model,
+                                    error_type=err_type,
+                                    reason=f"Model output failed validation ({err_type})",
+                                    marked_exhausted=False,
+                                )
+                                break
+
+                            _VERIFIED_WORKING_MODELS.add(model)
+                            if usage["total_tokens"] > 0:
+                                ts_done = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                print(
+                                    f"[{ts_done}] {context + ' ' if context else ''}Usage ({model}): "
+                                    f"prompt={usage['prompt_tokens']:,}, output={usage['candidates_tokens']:,}, "
+                                    f"thoughts={usage['thoughts_tokens']:,}, total={usage['total_tokens']:,} "
+                                    f"tokens | finish={usage['finish_reason']} | {latency_s:.1f}s"
+                                )
+                            return response.text.strip(), model
+
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        next_model = _next_available_model(model_pool, idx)
+                        print(f"[{ts}] [!] {model} returned an empty response. Cascading to {next_model}...")
+                        active_report.record_error(
+                            timestamp=ts,
+                            context=context,
+                            model=model,
+                            error_type="empty_response",
+                            status_code=None,
+                            quota_id=None,
+                            quota_limit=None,
+                            retry_delay=None,
+                            message="Model returned empty response text",
+                            resolution=f"Cascaded to {next_model}",
+                        )
+                        active_report.record_switch(
+                            timestamp=ts,
+                            context=context,
+                            from_model=model,
+                            to_model=next_model,
+                            error_type="empty_response",
+                            reason="Model returned empty response text",
+                            marked_exhausted=False,
+                        )
+                        break
+                    except errors.APIError as e:
+                        action, backoff = handle_generation_api_error(
+                            e,
+                            model=model,
+                            model_pool=model_pool,
+                            idx=idx,
+                            attempt=attempt,
+                            context=context,
+                            report=active_report,
+                        )
+                        if action == "cascade":
+                            break
+                        await asyncio.sleep(backoff)
+                continue
 
         for attempt in range(1, 6):
             active_report.record_attempt(model)
@@ -142,114 +261,17 @@ async def generate_with_fallback_async(
                 )
                 break
             except errors.APIError as e:
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                diag = parse_api_error_diagnostics(e)
-                err_type = diag["error_type"]
-                short_msg = diag["short_message"]
-
-                if is_daily_quota_exhausted(e):
-                    _EXHAUSTED_MODELS.add(model)
-                    next_model = _next_available_model(model_pool, idx)
-                    print(
-                        f"[{ts}] [!] Daily/zero quota exhausted for {model} ({short_msg}). Cascading to {next_model}..."
-                    )
-                    active_report.record_error(
-                        timestamp=ts,
-                        context=context,
-                        model=model,
-                        error_type=err_type,
-                        status_code=diag["status_code"],
-                        quota_id=diag["quota_id"],
-                        quota_limit=diag["quota_limit"],
-                        retry_delay=diag["retry_delay"],
-                        message=short_msg,
-                        resolution=f"Marked exhausted; cascaded to {next_model}",
-                    )
-                    active_report.record_switch(
-                        timestamp=ts,
-                        context=context,
-                        from_model=model,
-                        to_model=next_model,
-                        error_type=err_type,
-                        reason=short_msg,
-                        marked_exhausted=True,
-                    )
-                    break
-
-                if e.code == 404 or (e.message and "no longer available" in e.message.lower()):
-                    _EXHAUSTED_MODELS.add(model)
-                    next_model = _next_available_model(model_pool, idx)
-                    print(f"[{ts}] [!] {model} unavailable or deprecated ({short_msg}). Cascading to {next_model}...")
-                    active_report.record_error(
-                        timestamp=ts,
-                        context=context,
-                        model=model,
-                        error_type=err_type,
-                        status_code=diag["status_code"],
-                        quota_id=diag["quota_id"],
-                        quota_limit=diag["quota_limit"],
-                        retry_delay=diag["retry_delay"],
-                        message=short_msg,
-                        resolution=f"Marked unavailable; cascaded to {next_model}",
-                    )
-                    active_report.record_switch(
-                        timestamp=ts,
-                        context=context,
-                        from_model=model,
-                        to_model=next_model,
-                        error_type=err_type,
-                        reason=short_msg,
-                        marked_exhausted=True,
-                    )
-                    break
-
-                if attempt == 5:
-                    next_model = _next_available_model(model_pool, idx)
-                    print(
-                        f"[{ts}] [!] {model} unavailable after 5 attempts ({short_msg}). Cascading to {next_model}..."
-                    )
-                    active_report.record_error(
-                        timestamp=ts,
-                        context=context,
-                        model=model,
-                        error_type=err_type,
-                        status_code=diag["status_code"],
-                        quota_id=diag["quota_id"],
-                        quota_limit=diag["quota_limit"],
-                        retry_delay=diag["retry_delay"],
-                        message=short_msg,
-                        resolution=f"Max retries (5/5) reached; cascaded to {next_model}",
-                    )
-                    active_report.record_switch(
-                        timestamp=ts,
-                        context=context,
-                        from_model=model,
-                        to_model=next_model,
-                        error_type=err_type,
-                        reason=f"Failed after 5/5 attempts: {short_msg}",
-                        marked_exhausted=False,
-                    )
-                    break
-
-                default_backoff = min(attempt * 12 if e.code in (429, 503) else attempt * 5, 60)
-                suggested_wait = int(diag["retry_seconds"]) + 2 if diag["retry_seconds"] else 0
-                backoff = min(max(default_backoff, suggested_wait), 90)
-                print(
-                    f"[{ts}] [!] Transient {model} error ({err_type}: {short_msg}). "
-                    f"Retrying in {backoff}s ({attempt}/5)..."
-                )
-                active_report.record_error(
-                    timestamp=ts,
-                    context=context,
+                action, backoff = handle_generation_api_error(
+                    e,
                     model=model,
-                    error_type=err_type,
-                    status_code=diag["status_code"],
-                    quota_id=diag["quota_id"],
-                    quota_limit=diag["quota_limit"],
-                    retry_delay=diag["retry_delay"],
-                    message=short_msg,
-                    resolution=f"Retrying in {backoff}s (attempt {attempt}/5)",
+                    model_pool=model_pool,
+                    idx=idx,
+                    attempt=attempt,
+                    context=context,
+                    report=active_report,
                 )
+                if action == "cascade":
+                    break
                 await asyncio.sleep(backoff)
 
     raise RuntimeError("All models in the desirability path failed or exhausted quota.")
