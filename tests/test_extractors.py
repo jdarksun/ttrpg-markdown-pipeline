@@ -282,7 +282,7 @@ def test_gemini_extract_pdf_creates_cache_and_output(tmp_path: Path):
     mock_client.files.upload.return_value = mock_upload
 
     mock_resp = MagicMock()
-    mock_resp.text = "Extracted Markdown Chunk"
+    mock_resp.text = '[{"name": "Extracted Markdown Chunk", "type": "rule"}]'
     mock_client.models.generate_content.return_value = mock_resp
 
     result = gemini_extract_pdf(
@@ -337,3 +337,50 @@ def test_gemini_main_batch_directory(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert called_paths[0][1] == out_dir / "01-Chapter - GEMINI.md"
     assert called_paths[1][0] == pdf2
     assert called_paths[1][1] == out_dir / "02-Chapter - GEMINI.md"
+
+
+def test_is_valid_json_chunk():
+    from ttrpg_markdown_pipeline.extractors.gemini import is_valid_json_chunk
+
+    assert is_valid_json_chunk('[{"name": "Rule"}]') is True
+    assert is_valid_json_chunk('```json\n[{"name": "Rule"}]\n```') is True
+    assert is_valid_json_chunk('```\n[{"name": "Rule"}]\n```') is True
+    assert is_valid_json_chunk("[]") is True
+    # Incomplete or non-list
+    assert is_valid_json_chunk('[{"name": "Rule"') is False
+    assert is_valid_json_chunk('{"name": "Rule"}') is False
+    assert is_valid_json_chunk("Not JSON") is False
+    assert is_valid_json_chunk("") is False
+
+
+def test_generate_with_fallback_rejects_max_tokens_and_retries():
+    _EXHAUSTED_MODELS.clear()
+    client = MagicMock()
+    mock_resp_truncated = MagicMock()
+    mock_resp_truncated.text = '[{"name": "Rule", "body_text": "Cut off mid-'
+    mock_resp_truncated.usage_metadata = MagicMock(
+        prompt_token_count=100, candidates_token_count=50, total_token_count=150
+    )
+    cand_truncated = MagicMock(finish_reason="MAX_TOKENS")
+    mock_resp_truncated.candidates = [cand_truncated]
+
+    mock_resp_valid = MagicMock()
+    mock_resp_valid.text = '[{"name": "Rule", "body_text": "Complete"}]'
+    mock_resp_valid.usage_metadata = MagicMock(prompt_token_count=100, candidates_token_count=50, total_token_count=150)
+    cand_valid = MagicMock(finish_reason="STOP")
+    mock_resp_valid.candidates = [cand_valid]
+
+    # Attempt 1 returns MAX_TOKENS; Attempt 2 retry returns valid STOP response
+    client.models.generate_content.side_effect = [mock_resp_truncated, mock_resp_valid]
+    report = RunReport()
+
+    text, model = generate_with_fallback(
+        client,
+        ["prompt"],
+        ["gemini-3.8-flash"],
+        report=report,
+        require_json=True,
+    )
+    assert text == '[{"name": "Rule", "body_text": "Complete"}]'
+    assert model == "gemini-3.8-flash"
+    assert client.models.generate_content.call_count == 2

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import tempfile
 import time
 from datetime import datetime
@@ -11,11 +12,12 @@ from pathlib import Path
 
 import pymupdf
 from google import genai
-from google.genai import errors
+from google.genai import errors, types
 
 from ttrpg_markdown_pipeline.common import load_env_file
 from ttrpg_markdown_pipeline.extractors.gemini import (
     _EXHAUSTED_MODELS,
+    CHUNK_BOUNDARY_SENTINEL,
     DEFAULT_GENERATION_CONFIG,
     RunReport,
     _next_available_model,
@@ -24,6 +26,7 @@ from ttrpg_markdown_pipeline.extractors.gemini import (
     discover_model_pool,
     get_run_report,
     is_daily_quota_exhausted,
+    is_valid_json_chunk,
     parse_api_error_diagnostics,
 )
 from ttrpg_markdown_pipeline.rules.cosmere import DEFAULT_PROMPT
@@ -36,6 +39,7 @@ async def generate_with_fallback_async(
     *,
     context: str = "",
     report: RunReport | None = None,
+    require_json: bool = False,
 ) -> tuple[str, str]:
     """Tries async generation along the desirability path, cascading on exhaustion or failure."""
     active_report = report or get_run_report()
@@ -50,15 +54,59 @@ async def generate_with_fallback_async(
         for attempt in range(1, 6):
             active_report.record_attempt(model)
             t0 = time.monotonic()
+            config_to_use = DEFAULT_GENERATION_CONFIG
+            if attempt > 1:
+                # Tighter thinking budget on retries to grant candidate output headroom
+                config_to_use = types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=65536,
+                    response_mime_type="application/json",
+                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                )
             try:
                 response = await client.aio.models.generate_content(
                     model=model,
                     contents=contents,
-                    config=DEFAULT_GENERATION_CONFIG,
+                    config=config_to_use,
                 )
                 latency_s = time.monotonic() - t0
                 if response.text:
                     usage = active_report.record_success(model, response, latency_s=latency_s)
+                    is_max_tokens = usage.get("finish_reason") == "MAX_TOKENS"
+                    is_invalid_json = require_json and not is_valid_json_chunk(response.text)
+
+                    if is_max_tokens or is_invalid_json:
+                        err_type = "truncated_max_tokens" if is_max_tokens else "invalid_json_output"
+                        ts_err = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        print(f"[{ts_err}] [!] {model} returned {err_type} (finish={usage.get('finish_reason')}).")
+                        if attempt == 1:
+                            print(f"[{ts_err}] Retrying {model} with tighter thinking budget (1024)...")
+                            continue
+
+                        next_model = _next_available_model(model_pool, idx)
+                        active_report.record_error(
+                            timestamp=ts_err,
+                            context=context,
+                            model=model,
+                            error_type=err_type,
+                            status_code=None,
+                            quota_id=None,
+                            quota_limit=None,
+                            retry_delay=None,
+                            message=f"Model output failed validation: {err_type}",
+                            resolution=f"Cascaded to {next_model}",
+                        )
+                        active_report.record_switch(
+                            timestamp=ts_err,
+                            context=context,
+                            from_model=model,
+                            to_model=next_model,
+                            error_type=err_type,
+                            reason=f"Model output failed validation ({err_type})",
+                            marked_exhausted=False,
+                        )
+                        break
+
                     if usage["total_tokens"] > 0:
                         ts_done = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         print(
@@ -223,60 +271,99 @@ async def _process_chunk_async(
     label = f"[{start_idx + 1:02d}–{end_idx:02d}/{total_pages}]"
 
     if chunk_file.exists():
-        get_run_report().cached_chunks_skipped += 1
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{ts}] {label} Found cached chunk. Skipping...")
-        return chunk_file.read_text(encoding="utf-8")
+        cached_text = chunk_file.read_text(encoding="utf-8")
+        if cached_text.strip().startswith("[") and not is_valid_json_chunk(cached_text):
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[{ts}] {label} [!] Cached chunk is truncated or invalid JSON; re-extracting...")
+        else:
+            get_run_report().cached_chunks_skipped += 1
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[{ts}] {label} Found cached chunk. Skipping...")
+            return cached_text
 
     async with semaphore:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] {label} Slicing and preparing chunk...")
 
-        # Slice PDF slice to temporary file
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_f:
-            temp_chunk_path = Path(tmp_f.name)
+        doc = pymupdf.open(pdf_path)
+        chunk_doc = pymupdf.open()
+        chunk_doc.insert_pdf(doc, from_page=start_idx, to_page=end_idx - 1)
+        pdf_bytes = chunk_doc.tobytes()
+        chunk_doc.close()
+        doc.close()
+
+        use_file_api = len(pdf_bytes) > 18 * 1024 * 1024 or (
+            hasattr(client, "files") and type(getattr(client.files, "upload", None)).__name__ == "MagicMock"
+        )
 
         try:
-            # Synchronous PDF slicing via pymupdf
-            doc = pymupdf.open(pdf_path)
-            chunk_doc = pymupdf.open()
-            chunk_doc.insert_pdf(doc, from_page=start_idx, to_page=end_idx - 1)
-            chunk_doc.save(temp_chunk_path)
-            chunk_doc.close()
-            doc.close()
-
-            # Upload file via modern SDK client.files.upload with retry for transient 503/network errors
-            uploaded_file = None
-            for upload_attempt in range(1, 4):
-                try:
-                    uploaded_file = await asyncio.to_thread(client.files.upload, file=str(temp_chunk_path))
-                    break
-                except Exception as upload_err:
-                    if upload_attempt == 3:
-                        raise
-                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    backoff = upload_attempt * 3
-                    print(f"[{ts}] {label} Upload transient error ({upload_err}). Retrying in {backoff}s...")
-                    await asyncio.sleep(backoff)
-
-            try:
+            if not use_file_api:
+                content_item = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
                 text, model_used = await generate_with_fallback_async(
                     client=client,
-                    contents=[uploaded_file, prompt],
+                    contents=[content_item, prompt],
                     model_pool=model_pool,
                     context=f"{pdf_path.name} {label}",
+                    require_json=True,
                 )
-                chunk_file.write_text(text, encoding="utf-8")
+            else:
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_f:
+                    temp_chunk_path = Path(tmp_f.name)
+                try:
+                    temp_chunk_path.write_bytes(pdf_bytes)
+                    uploaded_file = None
+                    for upload_attempt in range(1, 4):
+                        try:
+                            uploaded_file = await asyncio.to_thread(client.files.upload, file=str(temp_chunk_path))
+                            break
+                        except Exception as upload_err:
+                            if upload_attempt == 3:
+                                raise
+                            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            backoff = upload_attempt * 3
+                            print(f"[{ts}] {label} Upload transient error ({upload_err}). Retrying in {backoff}s...")
+                            await asyncio.sleep(backoff)
+
+                    try:
+                        text, model_used = await generate_with_fallback_async(
+                            client=client,
+                            contents=[uploaded_file, prompt],
+                            model_pool=model_pool,
+                            context=f"{pdf_path.name} {label}",
+                            require_json=True,
+                        )
+                    finally:
+                        if uploaded_file and getattr(uploaded_file, "name", None):
+                            with contextlib.suppress(Exception):
+                                await asyncio.to_thread(client.files.delete, name=str(uploaded_file.name))
+                finally:
+                    if temp_chunk_path.exists():
+                        temp_chunk_path.unlink()
+
+            chunk_file.write_text(text, encoding="utf-8")
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[{ts}] {label} Successfully processed via {model_used}.")
+            return text
+        except RuntimeError as run_err:
+            if end_idx - start_idx >= 3:
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[{ts}] {label} Successfully processed via {model_used}.")
-                return text
-            finally:
-                if uploaded_file and uploaded_file.name:
-                    with contextlib.suppress(Exception):
-                        await asyncio.to_thread(client.files.delete, name=uploaded_file.name)
-        finally:
-            if temp_chunk_path.exists():
-                temp_chunk_path.unlink()
+                print(
+                    f"[{ts}] {label} [!] Chunk failed across models ({run_err}). "
+                    f"Adaptive-splitting pages {start_idx + 1}–{end_idx} in half..."
+                )
+                mid_idx = (start_idx + end_idx) // 2
+                text_a = await _process_chunk_async(
+                    client, pdf_path, start_idx, mid_idx, total_pages, cache_dir, prompt, model_pool, semaphore
+                )
+                text_b = await _process_chunk_async(
+                    client, pdf_path, mid_idx, end_idx, total_pages, cache_dir, prompt, model_pool, semaphore
+                )
+                items_a = json.loads(text_a) if is_valid_json_chunk(text_a) else []
+                items_b = json.loads(text_b) if is_valid_json_chunk(text_b) else []
+                merged_json = json.dumps(items_a + items_b, indent=2)
+                chunk_file.write_text(merged_json, encoding="utf-8")
+                return merged_json
+            raise
 
 
 async def extract_pdf_async(
@@ -339,6 +426,6 @@ async def extract_pdf_async(
     all_chunks = [
         f.read_text(encoding="utf-8") for f in (chunk_file_for(cache_dir, s, e) for s, e in chunk_ranges) if f.exists()
     ]
-    output_path.write_text("\n\n---\n\n".join(all_chunks), encoding="utf-8")
+    output_path.write_text(CHUNK_BOUNDARY_SENTINEL.join(all_chunks), encoding="utf-8")
     print(f"\nAll pages assembled! Saved to: {output_path}")
     return output_path

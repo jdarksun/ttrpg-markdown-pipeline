@@ -336,7 +336,10 @@ def _parse_single_chunk_json(chunk_text: str) -> list[dict[str, Any]]:
 
 def parse_gemini_json_payload(gemini_raw_text: str) -> list[dict[str, Any]]:
     """Extracts a JSON list of concept objects from Gemini output, handling code fences or multiple chunks."""
-    chunks = re.split(r"(?:^|\r?\n)[ \t]*---[ \t]*(?:\r?\n|$)", gemini_raw_text)
+    if "<!-- OKF_CHUNK_BOUNDARY -->" in gemini_raw_text:
+        chunks = gemini_raw_text.split("<!-- OKF_CHUNK_BOUNDARY -->")
+    else:
+        chunks = re.split(r"(?:^|\r?\n)[ \t]*---[ \t]*(?:\r?\n|$)", gemini_raw_text)
     combined_items: list[dict[str, Any]] = []
     for chunk in chunks:
         if chunk.strip():

@@ -266,3 +266,5 @@ $RECYCLE.BIN/
 
 # Output dir, let's not include it.
 .out
+
+repo_bundle.txt

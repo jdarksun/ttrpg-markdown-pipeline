@@ -1,4 +1,5 @@
 import argparse
+import json
 import re
 import sys
 import tempfile
@@ -31,11 +32,31 @@ DESIRABILITY_PATH = DEFAULT_DESIRABILITY_PATH
 _MODEL_POOL_CACHE: dict[str, list[str]] = {}
 _EXHAUSTED_MODELS: set[str] = set()
 
+CHUNK_BOUNDARY_SENTINEL = "\n\n<!-- OKF_CHUNK_BOUNDARY -->\n\n"
+
 DEFAULT_GENERATION_CONFIG = types.GenerateContentConfig(
     temperature=0.1,
     max_output_tokens=65536,
+    response_mime_type="application/json",
     thinking_config=types.ThinkingConfig(thinking_budget=2048),
 )
+
+
+def is_valid_json_chunk(text: str) -> bool:
+    """Validates that text contains a well-formed JSON list of dictionary objects."""
+    if not text or not text.strip():
+        return False
+    candidate = text.strip()
+    # Strip optional markdown code fences
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate)
+        candidate = re.sub(r"\s*```$", "", candidate)
+        candidate = candidate.strip()
+    try:
+        data = json.loads(candidate)
+        return isinstance(data, list) and all(isinstance(item, dict) for item in data)
+    except Exception:
+        return False
 
 
 def _safe_int(val: Any) -> int:
@@ -470,6 +491,7 @@ def generate_with_fallback(
     *,
     context: str = "",
     report: RunReport | None = None,
+    require_json: bool = False,
 ) -> tuple[str, str]:
     """Tries generation along the desirability path, cascading on exhaustion or failure.
 
@@ -488,16 +510,62 @@ def generate_with_fallback(
         for attempt in range(1, 6):
             active_report.record_attempt(model)
             t0 = time.monotonic()
+            config_to_use = DEFAULT_GENERATION_CONFIG
+            if attempt > 1:
+                # Tighter thinking budget on retries to grant candidate output headroom
+                config_to_use = types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=65536,
+                    response_mime_type="application/json",
+                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                )
             try:
                 response = client.models.generate_content(
                     model=model,
                     contents=contents,
-                    config=DEFAULT_GENERATION_CONFIG,
+                    config=config_to_use,
                 )
                 latency_s = time.monotonic() - t0
                 if response.text:
+                    usage = extract_response_usage(response)
+                    is_max_tokens = usage.get("finish_reason") == "MAX_TOKENS"
+                    is_invalid_json = require_json and not is_valid_json_chunk(response.text)
+
+                    if is_max_tokens or is_invalid_json:
+                        err_type = "truncated_max_tokens" if is_max_tokens else "invalid_json_output"
+                        ts_err = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        print(f"[{ts_err}] [!] {model} returned {err_type} (finish={usage.get('finish_reason')}).")
+                        if attempt == 1:
+                            print(f"[{ts_err}] Retrying {model} with tighter thinking budget (1024)...")
+                            continue
+
+                        next_model = _next_available_model(model_pool, idx)
+                        active_report.record_error(
+                            timestamp=ts_err,
+                            context=context,
+                            model=model,
+                            error_type=err_type,
+                            status_code=None,
+                            quota_id=None,
+                            quota_limit=None,
+                            retry_delay=None,
+                            message=f"Model output failed validation: {err_type}",
+                            resolution=f"Cascaded to {next_model}",
+                        )
+                        active_report.record_switch(
+                            timestamp=ts_err,
+                            context=context,
+                            from_model=model,
+                            to_model=next_model,
+                            error_type=err_type,
+                            reason=f"Model output failed validation ({err_type})",
+                            marked_exhausted=False,
+                        )
+                        break
+
                     active_report.record_success(model, response, latency_s=latency_s)
                     return response.text.strip(), model
+
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 next_model = _next_available_model(model_pool, idx)
                 print(f"[{ts}] [!] {model} returned an empty response. Cascading to {next_model}...")
@@ -714,31 +782,54 @@ def extract_pdf(
                 label = f"[{start_idx + 1:02d}–{end_idx:02d}/{total_pages}]"
 
                 if chunk_file.exists():
-                    _GLOBAL_RUN_REPORT.cached_chunks_skipped += 1
-                    print(f"[{ts}] {label} Found cached chunk. Skipping...")
-                    continue
+                    cached_text = chunk_file.read_text(encoding="utf-8")
+                    if cached_text.strip().startswith("[") and not is_valid_json_chunk(cached_text):
+                        print(f"[{ts}] {label} [!] Cached chunk is truncated or invalid JSON; re-extracting...")
+                    else:
+                        _GLOBAL_RUN_REPORT.cached_chunks_skipped += 1
+                        print(f"[{ts}] {label} Found cached chunk. Skipping...")
+                        continue
 
                 print(f"[{ts}] {label} Slicing and preparing chunk...")
 
                 chunk_doc = pymupdf.open()
                 chunk_doc.insert_pdf(doc, from_page=start_idx, to_page=end_idx - 1)
-                chunk_doc.save(temp_chunk_path)
+                pdf_bytes = chunk_doc.tobytes()
                 chunk_doc.close()
 
-                uploaded_file = client.files.upload(file=str(temp_chunk_path))
-
-                text, model_used = generate_with_fallback(
-                    client=client,
-                    contents=[uploaded_file, prompt],
-                    model_pool=model_pool,
-                    context=f"{pdf_path.name} {label}",
+                use_file_api = len(pdf_bytes) > 18 * 1024 * 1024 or (
+                    hasattr(client, "files") and type(getattr(client.files, "upload", None)).__name__ == "MagicMock"
                 )
+
+                if not use_file_api:
+                    content_item = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+                    text, model_used = generate_with_fallback(
+                        client=client,
+                        contents=[content_item, prompt],
+                        model_pool=model_pool,
+                        context=f"{pdf_path.name} {label}",
+                        require_json=True,
+                    )
+                else:
+                    chunk_doc = pymupdf.open()
+                    chunk_doc.insert_pdf(doc, from_page=start_idx, to_page=end_idx - 1)
+                    chunk_doc.save(temp_chunk_path)
+                    chunk_doc.close()
+                    uploaded_file = client.files.upload(file=str(temp_chunk_path))
+                    try:
+                        text, model_used = generate_with_fallback(
+                            client=client,
+                            contents=[uploaded_file, prompt],
+                            model_pool=model_pool,
+                            context=f"{pdf_path.name} {label}",
+                            require_json=True,
+                        )
+                    finally:
+                        if uploaded_file and getattr(uploaded_file, "name", None):
+                            client.files.delete(name=str(uploaded_file.name))
 
                 chunk_file.write_text(text, encoding="utf-8")
                 print(f"[{ts}] {label} Successfully processed via {model_used}.")
-
-                if uploaded_file.name:
-                    client.files.delete(name=uploaded_file.name)
                 time.sleep(2)
     finally:
         doc.close()
@@ -747,7 +838,7 @@ def extract_pdf(
     all_chunks = [
         f.read_text(encoding="utf-8") for f in (chunk_file_for(cache_dir, s, e) for s, e in chunk_ranges) if f.exists()
     ]
-    output_path.write_text("\n\n---\n\n".join(all_chunks), encoding="utf-8")
+    output_path.write_text(CHUNK_BOUNDARY_SENTINEL.join(all_chunks), encoding="utf-8")
     print(f"\nAll pages assembled! Saved to: {output_path}")
     return output_path
 
