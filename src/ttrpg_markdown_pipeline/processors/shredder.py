@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,8 @@ from ttrpg_markdown_pipeline.models import (
     OKFWeapon,
 )
 from ttrpg_markdown_pipeline.rules.cosmere import UNIVERSAL_INLINE_FIXES
+
+logger = logging.getLogger(__name__)
 
 
 def sanitize_slug(name: str) -> str:
@@ -51,13 +54,68 @@ def split_docling_by_headers(docling_text: str) -> dict[str, str]:
         clean_title = re.sub(r"\s*\([^)]*\)", "", raw_title).strip()
         norm_key = sanitize_slug(clean_title)
 
+        level = len(m.group(1))
         start_pos = m.end()
-        end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(docling_text)
-        section_body = docling_text[start_pos:end_pos].strip()
+        end_pos = len(docling_text)
 
+        if level == 2:
+            # Slices up to the next ## heading (preserving child ### subheadings in the parent section)
+            for next_m in matches[i + 1 :]:
+                if len(next_m.group(1)) <= 2:
+                    end_pos = next_m.start()
+                    break
+        else:
+            # level == 3: Slices up to the next heading (## or ###)
+            if i + 1 < len(matches):
+                end_pos = matches[i + 1].start()
+
+        section_body = docling_text[start_pos:end_pos].strip()
         sections[norm_key] = section_body
 
     return sections
+
+
+def _normalize_for_subsumption(text: str) -> str:
+    """Normalizes text for substring and subsumption comparisons by collapsing whitespace and formatting."""
+    lowered = text.lower()
+    cleaned = re.sub(r"[#*_`~>|-]", " ", lowered)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _is_subsumed_rule(child: dict[str, Any], parent: dict[str, Any]) -> bool:
+    """Checks whether child concept is hierarchically subsumed by a parent rule or lore entry."""
+    child_type = str(child.get("type", "rule")).lower()
+    parent_type = str(parent.get("type", "rule")).lower()
+    if child_type != parent_type:
+        return False
+    if child_type not in ("rule", "lore"):
+        return False
+
+    child_name = str(child.get("name", "")).strip()
+    if not child_name:
+        return False
+
+    parent_body = str(parent.get("body_text", "")).strip()
+    child_body = str(child.get("body_text", "")).strip()
+
+    if len(parent_body) <= len(child_body):
+        return False
+
+    norm_parent = _normalize_for_subsumption(parent_body)
+    norm_child = _normalize_for_subsumption(child_body)
+
+    if not norm_child:
+        return False
+
+    # Criterion 1: Parent body contains child name as a markdown subheading AND a body snippet
+    heading_pattern = rf"^#{{2,4}}\s+{re.escape(child_name)}(?:\s|$)"
+    has_heading = bool(re.search(heading_pattern, parent_body, re.IGNORECASE | re.MULTILINE))
+    snippet = norm_child[: min(len(norm_child), 50)]
+    if has_heading and snippet and snippet in norm_parent:
+        return True
+
+    # Criterion 2: Complete body inclusion with substantial length (>= 80 chars)
+    return bool(len(norm_child) >= 80 and norm_child in norm_parent)
 
 
 def apply_inline_repairs(text: str) -> str:
@@ -417,20 +475,44 @@ def consolidate_concepts(concepts: list[dict[str, Any]]) -> list[dict[str, Any]]
                 if existing.get(field) is None or existing.get(field) == "":
                     existing[field] = val
 
-    return list(grouped.values())
+    candidates = list(grouped.values())
+
+    # Subsumption deduplication pass: drop child concepts subsumed by a parent rule/lore
+    subsumed_indices: set[int] = set()
+    for i, child in enumerate(candidates):
+        if i in subsumed_indices:
+            continue
+        for j, parent in enumerate(candidates):
+            if i == j or j in subsumed_indices:
+                continue
+            if _is_subsumed_rule(child, parent):
+                child_ex = str(child.get("example_text") or "").strip()
+                if child_ex:
+                    parent_ex = str(parent.get("example_text") or "").strip()
+                    if not parent_ex:
+                        parent["example_text"] = child_ex
+                    elif child_ex not in parent_ex:
+                        parent["example_text"] = f"{parent_ex}\n\n{child_ex}"
+                subsumed_indices.add(i)
+                break
+
+    return [item for idx, item in enumerate(candidates) if idx not in subsumed_indices]
 
 
 def shred_chapter(
-    docling_md_path: Path,
+    docling_md_path: Path | None,
     gemini_output_path: Path,
     vault_dir: Path,
     default_sourcebook: str | None = None,
 ) -> list[Path]:
     """Shreds a single chapter's Docling & Gemini output into atomic OKF Markdown files in vault_dir."""
-    docling_text = clean_extraction_artifacts(docling_md_path.read_text(encoding="utf-8"))
+    docling_sections: dict[str, str] = {}
+    if docling_md_path and docling_md_path.exists():
+        docling_text = clean_extraction_artifacts(docling_md_path.read_text(encoding="utf-8"))
+        docling_sections = split_docling_by_headers(docling_text)
+
     gemini_text = gemini_output_path.read_text(encoding="utf-8")
 
-    docling_sections = split_docling_by_headers(docling_text)
     concepts_raw = parse_gemini_json_payload(gemini_text)
     concepts_consolidated = consolidate_concepts(concepts_raw)
 
@@ -487,7 +569,7 @@ def shred_chapter(
         if file_path.exists():
             try:
                 existing_raw = file_path.read_text(encoding="utf-8")
-                parts = existing_raw.split("---\n")
+                parts = existing_raw.split("---\n", 2)
                 if len(parts) >= 3:
                     existing_meta = yaml.safe_load(parts[1]) or {}
                     existing_body = parts[2].strip()
@@ -495,11 +577,34 @@ def shred_chapter(
                     existing_item["body_text"] = existing_body
                     merged_items = consolidate_concepts([existing_item, item])
                     item = merged_items[0]
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to parse existing vault file %s for merging: %s", file_path, e)
 
         concept = instantiate_okf_concept(item, docling_body=matched_body)
         file_path.write_text(concept.to_markdown(), encoding="utf-8")
         saved_files.append(file_path)
+
+        # Orphan cleanup: if this parent rule contains ### Subheadings, clean up any standalone child files on disk
+        if c_type in ("rule", "lore") and item.get("body_text"):
+            child_subheadings = re.findall(r"^#{3,4}\s+([^\n]+)", str(item["body_text"]), re.MULTILINE)
+            for child_subheading in child_subheadings:
+                child_clean = re.sub(r"\s*\([^)]*\)", "", child_subheading).strip()
+                child_slug = sanitize_slug(child_clean)
+                child_path = target_dir / f"{child_slug}.md"
+                if child_path.exists() and child_path.resolve() != file_path.resolve():
+                    try:
+                        child_raw = child_path.read_text(encoding="utf-8")
+                        child_parts = child_raw.split("---\n", 2)
+                        if len(child_parts) >= 3:
+                            child_meta = yaml.safe_load(child_parts[1]) or {}
+                            child_item = dict(child_meta)
+                            child_item["body_text"] = child_parts[2].strip()
+                            if _is_subsumed_rule(child_item, item):
+                                child_path.unlink()
+                                logger.info("Cleaned up orphaned subsumed child concept: %s", child_path.name)
+                                if child_path in saved_files:
+                                    saved_files.remove(child_path)
+                    except Exception as e:
+                        logger.warning("Could not check orphaned child file %s: %s", child_path, e)
 
     return saved_files

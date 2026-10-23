@@ -436,3 +436,170 @@ def test_parse_gemini_json_payload_handles_truncated_chunk_without_poisoning_nex
     names = [item["name"] for item in items]
     assert "Step 1: Origins" in names
     assert "Step 4: Skills" in names
+
+
+def test_consolidate_concepts_subsumption():
+    parent_rule = {
+        "name": "Opportunities and Complications",
+        "type": "rule",
+        "category": "Resolution",
+        "body_text": (
+            "Opportunities and complications add dynamic flair to tests.\n\n"
+            "### Spending an Opportunity\n"
+            "When you roll an opportunity on the plot die, you may spend it to activate a special effect "
+            "or grant an advantage to an ally.\n\n"
+            "### Facing a Complication\n"
+            "When you roll a complication, the GM may introduce an unexpected setback or danger."
+        ),
+        "example_text": None,
+    }
+    child_rule = {
+        "name": "Spending an Opportunity",
+        "type": "rule",
+        "category": "Resolution",
+        "body_text": (
+            "When you roll an opportunity on the plot die, you may spend it to activate a special effect "
+            "or grant an advantage to an ally."
+        ),
+        "example_text": "GM: You rolled an opportunity!\nPlayer: I spend it to help Kelsier.",
+    }
+    standalone_rule = {
+        "name": "Disengage",
+        "type": "rule",
+        "category": "Combat",
+        "body_text": "Spend [1 Action] to move away safely.",
+    }
+
+    consolidated = consolidate_concepts([child_rule, parent_rule, standalone_rule])
+
+    # child_rule should be subsumed into parent_rule; standalone_rule remains
+    assert len(consolidated) == 2
+    names = [item["name"] for item in consolidated]
+    assert "Opportunities and Complications" in names
+    assert "Disengage" in names
+    assert "Spending an Opportunity" not in names
+
+    # The parent rule should now hold the child's example_text
+    parent_merged = next(item for item in consolidated if item["name"] == "Opportunities and Complications")
+    assert parent_merged["example_text"] is not None
+    assert "GM: You rolled an opportunity!" in parent_merged["example_text"]
+
+
+def test_split_docling_by_headers_hierarchy():
+    docling_md = (
+        "## Core Subsystem\n\n"
+        "Overview of the subsystem.\n\n"
+        "### Step 1: Initialization\n\n"
+        "First step details.\n\n"
+        "### Step 2: Resolution\n\n"
+        "Second step details.\n\n"
+        "## Next Major System\n\n"
+        "Overview of the next system.\n"
+    )
+
+    sections = split_docling_by_headers(docling_md)
+    assert "core_subsystem" in sections
+    assert "step_1_initialization" in sections
+    assert "step_2_resolution" in sections
+    assert "next_major_system" in sections
+
+    # Parent section includes both sub-steps
+    core_text = sections["core_subsystem"]
+    assert "Overview of the subsystem." in core_text
+    assert "### Step 1: Initialization" in core_text
+    assert "First step details." in core_text
+    assert "### Step 2: Resolution" in core_text
+    assert "Second step details." in core_text
+    # Does not include the next ## heading
+    assert "Next Major System" not in core_text
+
+    # Child sections are individually accessible
+    assert "First step details." in sections["step_1_initialization"]
+    assert "### Step 2: Resolution" not in sections["step_1_initialization"]
+
+
+def test_shred_chapter_preserves_body_with_horizontal_rule(tmp_path: Path):
+    vault_dir = tmp_path / "okf_vault"
+    source_dir = vault_dir / "mistborn_world_guide" / "rules"
+    source_dir.mkdir(parents=True, exist_ok=True)
+
+    rule_file = source_dir / "complex_resolution.md"
+    initial_content = (
+        "---\n"
+        "schema_version: 1.0.0\n"
+        "sourcebook: Mistborn World Guide\n"
+        "name: Complex Resolution\n"
+        "type: rule\n"
+        "---\n\n"
+        "Section 1 before horizontal rule.\n\n"
+        "---\n\n"
+        "Section 2 after horizontal rule.\n"
+    )
+    rule_file.write_text(initial_content, encoding="utf-8")
+
+    gemini_file = tmp_path / "01-Chapter - GEMINI.md"
+    gemini_payload = [
+        {
+            "schema_version": "1.0.0",
+            "sourcebook": "Mistborn World Guide",
+            "name": "Complex Resolution",
+            "type": "rule",
+            "body_text": "Section 1 before horizontal rule.\n\n---\n\nSection 2 after horizontal rule.",
+        }
+    ]
+    gemini_file.write_text(f"```json\n{json.dumps(gemini_payload)}\n```", encoding="utf-8")
+
+    shred_chapter(None, gemini_file, vault_dir, default_sourcebook="Mistborn World Guide")
+
+    updated_content = rule_file.read_text(encoding="utf-8")
+    assert "Section 1 before horizontal rule." in updated_content
+    assert "Section 2 after horizontal rule." in updated_content
+
+
+def test_shred_chapter_orphan_cleanup(tmp_path: Path):
+    vault_dir = tmp_path / "okf_vault"
+    source_dir = vault_dir / "stormlight_rpg" / "rules"
+    source_dir.mkdir(parents=True, exist_ok=True)
+
+    # Simulate an orphaned child file left from an earlier run
+    orphan_file = source_dir / "spending_an_opportunity.md"
+    orphan_file.write_text(
+        "---\n"
+        "schema_version: 1.0.0\n"
+        "sourcebook: Stormlight RPG\n"
+        "name: Spending an Opportunity\n"
+        "type: rule\n"
+        "---\n\n"
+        "When you roll an opportunity, spend it to activate a talent.\n",
+        encoding="utf-8",
+    )
+    assert orphan_file.exists()
+
+    gemini_file = tmp_path / "02-Chapter - GEMINI.md"
+    gemini_payload = [
+        {
+            "schema_version": "1.0.0",
+            "sourcebook": "Stormlight RPG",
+            "name": "Opportunities and Complications",
+            "type": "rule",
+            "body_text": (
+                "Opportunities and complications provide narrative turns.\n\n"
+                "### Spending an Opportunity\n"
+                "When you roll an opportunity, spend it to activate a talent.\n\n"
+                "### Facing a Complication\n"
+                "Complications introduce GM moves.\n"
+            ),
+        }
+    ]
+    gemini_file.write_text(f"```json\n{json.dumps(gemini_payload)}\n```", encoding="utf-8")
+
+    saved = shred_chapter(None, gemini_file, vault_dir, default_sourcebook="Stormlight RPG")
+
+    # Parent rule is saved
+    parent_file = source_dir / "opportunities_and_complications.md"
+    assert parent_file.exists()
+    assert parent_file in saved
+
+    # The orphaned child file was removed
+    assert not orphan_file.exists()
+    assert orphan_file not in saved
