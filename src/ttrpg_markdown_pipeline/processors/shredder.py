@@ -115,6 +115,9 @@ def clean_extraction_artifacts(text: str) -> str:
 
 
 STAT_BLOCK_LABELS = {
+    "physical",
+    "cognitive",
+    "spiritual",
     "deflect",
     "movement",
     "senses",
@@ -163,6 +166,10 @@ STAT_BLOCK_LABELS = {
     "conditions",
     "effect",
     "effects",
+    "strike",
+    "graze",
+    "hit",
+    "miss",
     "critical",
     "success",
     "failure",
