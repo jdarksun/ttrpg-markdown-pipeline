@@ -2,7 +2,27 @@
 
 import re
 
-# Chapters containing these words in their title trigger the Full Pipeline (Docling + Gemini + Merge)
+# Chapters matching these terms are pure front/back metadata and skip Gemini Vision & OKF shredding
+CHAPTER_DENYLIST = [
+    "credits",
+    "contents",
+    "table of contents",
+    "acknowledgments",
+    "acknowledgements",
+    "character sheet",
+    "index",
+    "glossary",
+    "backertable",
+]
+
+
+def is_substantive_chapter(title: str) -> bool:
+    """Returns True if the chapter is substantive game content (not on CHAPTER_DENYLIST)."""
+    lower_title = title.lower()
+    return not any(denied in lower_title for denied in CHAPTER_DENYLIST)
+
+
+# Chapters containing these words in their title are explicitly mechanical (used for appendix disambiguation)
 MECHANICS_KEYWORDS = [
     # Paths, Classes, and Features
     "path",  # Heroic Paths, Radiant Paths, Metalborn Paths
@@ -70,18 +90,18 @@ ADVENTURE_KEYWORDS = [
     "adventure module",
 ]
 
-DEFAULT_PROMPT = """
-You are a precision TTRPG rules extraction engine.
-Analyze this Cosmere RPG rules section and extract all mechanical concepts, talents, actions, items, and rules into a STRICT JSON list of objects matching the Open Knowledge Format (OKF) schema.
+UNIFIED_PROMPT = """
+You are a precision TTRPG rules and worldbuilding extraction engine.
+Analyze this TTRPG section and extract all mechanical concepts (talents, actions, items, weapons, armor, adversaries, rules, GM adjudication procedures) AND any distinct worldbuilding entities (cultures, factions, historical eras, locations, lore) into a STRICT JSON list of objects matching the Open Knowledge Format (OKF) schema.
 
 CRITICAL INSTRUCTIONS:
 1. Output ONLY a valid JSON array of objects. Do not wrap with prose, introduction, or conversational text. Fenced markdown json (```json ... ```) is acceptable.
 2. For each extracted concept, output an object with:
    - "schema_version": "1.0.0"
    - "sourcebook": The sourcebook or publication identifier (e.g. "Mistborn World Guide", "Stormlight RPG")
-   - "type": One of "talent", "weapon", "armor", "item", "rule", or "adversary"
-   - "name": Canonical name of the concept (e.g. "Pewterarm Weaponcraft", "Longsword", "Disengage")
-   - "category": Parent tree, group, or section (e.g. "Pewter Allomancy", "Light Weaponry", "Combat Actions")
+   - "type": One of "talent", "weapon", "armor", "item", "rule", "adversary", "lore", "faction", or "location"
+   - "name": Canonical name of the concept or entity (e.g. "Pewterarm Weaponcraft", "Longsword", "Disengage", "Ghostbloods")
+   - "category": Parent tree, group, culture, or section (e.g. "Pewter Allomancy", "Light Weaponry", "Combat Actions", "Roshar Factions")
    - Concept-specific fields:
      * For "talent": "prerequisites" (string or null) and "activation" (standardized: "[1 Action]", "[2 Actions]", "[3 Actions]", "[Reaction]", "[Free Action]", "[Special Activation]", or "[Passive]")
      * For "weapon": "damage", "range", "traits" (list of strings), "cost"
@@ -89,8 +109,9 @@ CRITICAL INSTRUCTIONS:
      * For "item": "cost", "weight"
      * For "rule": "action_cost" (standardized activation), "trigger"
      * For "adversary": "tier", "role"
-   - "body_text": The complete rules description and mechanical effects. Do NOT summarize or omit rules nuances.
-   - "example_text": Any gameplay dialogue transcripts, play examples, or in-character banter illustrating the rule (or null if none). Keep pure mechanics in body_text.
+     * For "lore", "faction", or "location": "key_themes" (list of 2-5 thematic tags) and "adventure_hooks" (list of 2-4 plot hooks or encounter seeds)
+   - "body_text": The complete, verbatim rules description, stat block, or lore entry. Do NOT summarize, abbreviate, or omit nuances. Exclude page footers and artist credits.
+   - "example_text": Any gameplay dialogue transcripts, play examples, or in-world quotes/epigraphs illustrating the concept (or null if none). Keep all mechanical stats and rules in body_text.
 
 Strict Icon Translation Rules for body_text & activation:
 - Single filled diamond -> `[1 Action]`
@@ -103,6 +124,8 @@ Strict Icon Translation Rules for body_text & activation:
 - Crossed keys / sunburst icon -> `[Opportunity]`
 - Spiked skull / complication icon -> `[Complication]`
 """  # noqa: E501
+
+DEFAULT_PROMPT = UNIFIED_PROMPT
 
 LORE_PROMPT = """
 You are a precision TTRPG worldbuilding and narrative lore extraction engine.

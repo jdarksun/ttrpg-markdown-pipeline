@@ -31,10 +31,10 @@ def test_split_pdf_by_chapters(sample_pdf_with_toc: Path, tmp_path: Path):
 
     assert len(chapters) == 3
 
-    # Chapter 0 (Intro)
+    # Chapter 0 (Intro) -> substantive chapter (not on CHAPTER_DENYLIST), so mechanics is True
     assert chapters[0].path.name == "00-Introduction.pdf"
     assert len(pymupdf.open(chapters[0].path)) == 2
-    assert chapters[0].mechanics is False
+    assert chapters[0].mechanics is True
 
     # Chapter 1 (Heroic Paths) -> detected as mechanics, numbered 04
     assert chapters[1].path.name == "04-Chapter 4 - Heroic Paths.pdf"
@@ -156,15 +156,35 @@ def test_process_chapter_docling_only_flag(tmp_path: Path):
         mock_patch.assert_called_once_with(final_md)
 
 
-def test_split_pdf_by_chapters_all_mechanics(sample_pdf_with_toc: Path, tmp_path: Path):
-    split_dir = tmp_path / "PDF_Chapters"
-    chapters = split_pdf_by_chapters(sample_pdf_with_toc, split_dir, all_mechanics=True)
+def test_split_pdf_by_chapters_all_mechanics(tmp_path: Path):
+    pdf_path = tmp_path / "Denylist_Test.pdf"
+    doc = pymupdf.open()
+    for i in range(6):
+        doc.new_page().insert_text((72, 72), f"Page {i + 1}")
+    doc.set_toc(
+        [
+            [1, "Credits", 1],
+            [1, "Chapter 13: Gamemastering", 3],
+            [1, "Character Sheet", 5],
+        ]
+    )
+    doc.save(pdf_path)
+    doc.close()
 
-    assert len(chapters) == 3
-    # With all_mechanics=True, even Introduction should have mechanics=True
-    assert chapters[0].mechanics is True
-    assert chapters[1].mechanics is True
-    assert chapters[2].mechanics is True
+    split_dir = tmp_path / "PDF_Chapters"
+    default_chapters = split_pdf_by_chapters(pdf_path, split_dir, all_mechanics=False)
+    assert len(default_chapters) == 3
+    # Denylisted chapters skip by default; Gamemastering is substantive and processed
+    assert default_chapters[0].mechanics is False
+    assert default_chapters[0].mode == "skip"
+    assert default_chapters[1].mechanics is True
+    assert default_chapters[1].mode == "mechanics"
+    assert default_chapters[2].mechanics is False
+    assert default_chapters[2].mode == "skip"
+
+    # With all_mechanics=True, even denylisted chapters have mechanics=True
+    all_chapters = split_pdf_by_chapters(pdf_path, split_dir, all_mechanics=True)
+    assert all(c.mechanics is True for c in all_chapters)
 
 
 def test_split_pdf_by_chapters_include_lore_and_adventure(tmp_path: Path):

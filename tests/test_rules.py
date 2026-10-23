@@ -1,9 +1,12 @@
 from ttrpg_markdown_pipeline.rules.cosmere import (
     ADVENTURE_KEYWORDS,
     ADVENTURE_PROMPT,
+    CHAPTER_DENYLIST,
     LORE_KEYWORDS,
     LORE_PROMPT,
     MECHANICS_KEYWORDS,
+    UNIFIED_PROMPT,
+    is_substantive_chapter,
     patch_cosmere_rules,
 )
 
@@ -86,3 +89,23 @@ def test_lore_and_adventure_keywords_and_prompts():
     assert "adventure_hooks" in LORE_PROMPT
     assert "adventure_node" in ADVENTURE_PROMPT
     assert "skill_checks" in ADVENTURE_PROMPT
+
+
+def test_chapter_denylist_and_unified_prompt():
+    assert "credits" in CHAPTER_DENYLIST
+    assert not is_substantive_chapter("00-Credits")
+    assert not is_substantive_chapter("01-Table of Contents")
+    assert not is_substantive_chapter("18-Glossary and Index")
+    assert not is_substantive_chapter("19-Acknowledgments")
+    assert not is_substantive_chapter("20-Character Sheet")
+
+    assert is_substantive_chapter("02-Introduction")
+    assert is_substantive_chapter("01-Chapter 1 - Character Creation")
+    assert is_substantive_chapter("08-Chapter 8 - Goals and Rewards")
+    assert is_substantive_chapter("13-Chapter 13 - Gamemastering")
+    assert is_substantive_chapter("16-The Next Step")
+
+    assert "key_themes" in UNIFIED_PROMPT
+    assert "adventure_hooks" in UNIFIED_PROMPT
+    assert "talent" in UNIFIED_PROMPT
+    assert "adversary" in UNIFIED_PROMPT

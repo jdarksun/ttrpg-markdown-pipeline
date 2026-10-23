@@ -27,6 +27,7 @@ from ttrpg_markdown_pipeline.rules.cosmere import (
     LORE_KEYWORDS,
     LORE_PROMPT,
     MECHANICS_KEYWORDS,
+    is_substantive_chapter,
 )
 
 
@@ -103,22 +104,22 @@ def split_pdf_by_chapters(
                 chap_doc.save(out_path)
                 chap_doc.close()
 
-            is_mechanics = all_mechanics or any(kw in clean_title.lower() for kw in MECHANICS_KEYWORDS)
-            is_adventure = adventure_mode and any(kw in clean_title.lower() for kw in ADVENTURE_KEYWORDS)
-            is_lore = include_lore and any(kw in clean_title.lower() for kw in LORE_KEYWORDS)
+            lower_title = clean_title.lower()
+            is_denied = not all_mechanics and not is_substantive_chapter(clean_title)
+            is_explicit_mechanics = any(kw in lower_title for kw in MECHANICS_KEYWORDS)
+            is_adventure = adventure_mode and (
+                any(kw in lower_title for kw in ADVENTURE_KEYWORDS) or not is_explicit_mechanics
+            )
+            is_lore = include_lore and any(kw in lower_title for kw in LORE_KEYWORDS) and not is_explicit_mechanics
 
-            if is_mechanics:
-                chap_mode = "mechanics"
+            if is_denied:
+                chap_mode = "skip"
             elif is_adventure:
                 chap_mode = "adventure"
             elif is_lore:
                 chap_mode = "lore"
-            elif adventure_mode:
-                chap_mode = "adventure"
-            elif include_lore:
-                chap_mode = "lore"
             else:
-                chap_mode = "skip"
+                chap_mode = "mechanics"
 
             needs_gemini = chap_mode != "skip"
             generated.append(Chapter(path=out_path, title=clean_title, mechanics=needs_gemini, mode=chap_mode))
