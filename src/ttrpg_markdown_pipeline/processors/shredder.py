@@ -114,6 +114,71 @@ def clean_extraction_artifacts(text: str) -> str:
     return cleaned.strip()
 
 
+STAT_BLOCK_LABELS = {
+    "deflect",
+    "movement",
+    "senses",
+    "skills",
+    "physical skills",
+    "cognitive skills",
+    "spiritual skills",
+    "languages",
+    "health",
+    "focus",
+    "investiture",
+    "traits",
+    "expert traits",
+    "weapon traits",
+    "armor traits",
+    "prerequisite",
+    "prerequisites",
+    "activation",
+    "trigger",
+    "target",
+    "targets",
+    "duration",
+    "range",
+    "damage",
+    "cost",
+    "price",
+    "weight",
+    "tier",
+    "role",
+    "size",
+    "speed",
+    "strength",
+    "intellect",
+    "willpower",
+    "awareness",
+    "presence",
+    "actions",
+    "reactions",
+    "free actions",
+    "features",
+    "tactics",
+    "immunities",
+    "resistances",
+    "vulnerabilities",
+    "condition",
+    "conditions",
+    "effect",
+    "effects",
+    "critical",
+    "success",
+    "failure",
+    "opportunity",
+    "opportunities",
+    "complication",
+    "complications",
+    "note",
+    "warning",
+    "tip",
+    "gm tip",
+    "rules tip",
+    "on your character sheet",
+}
+
+
 def split_mechanics_and_examples(text: str) -> tuple[str, str | None]:
     """Splits a body of rules text into pure mechanical rules and play examples / dialogue."""
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
@@ -123,12 +188,19 @@ def split_mechanics_and_examples(text: str) -> tuple[str, str | None]:
     mechanics_paras: list[str] = []
     example_paras: list[str] = []
 
-    speaker_pattern = re.compile(r"^(?:[A-Z][a-zA-Z\s]{1,15}|GM|DM):\s+")
+    speaker_pattern = re.compile(r"^([A-Z][a-zA-Z\s]{1,22}|GM|DM):\s+")
     example_heading_pattern = re.compile(
         r"^(?:#{1,4}\s*)?(?:\*\*|\*)?Example(?:\s+(?:Play|of\s+Play))?(?:\*\*|\*)?:?",
         re.IGNORECASE,
     )
     heading_pattern = re.compile(r"^#{1,4}\s+")
+
+    def _is_dialogue_speaker(line: str) -> bool:
+        m = speaker_pattern.match(line)
+        if not m:
+            return False
+        label = m.group(1).strip().lower()
+        return label not in STAT_BLOCK_LABELS
 
     in_example_block = False
 
@@ -146,7 +218,7 @@ def split_mechanics_and_examples(text: str) -> tuple[str, str | None]:
                 mechanics_paras.append(para)
             else:
                 example_paras.append(para)
-        elif speaker_pattern.match(lines[0]):
+        elif _is_dialogue_speaker(lines[0]):
             example_paras.append(para)
         else:
             mechanics_paras.append(para)
@@ -168,12 +240,12 @@ def instantiate_okf_concept(item_dict: dict[str, Any], docling_body: str | None 
         merged_dict["category"] = "General"
 
     raw_body = ""
-    if docling_body and docling_body.strip():
-        # Prefer Docling verbatim layout text if matched, repaired with inline glyphs
-        raw_body = clean_extraction_artifacts(apply_inline_repairs(docling_body))
-    elif "body_text" in merged_dict and merged_dict["body_text"]:
-        # Fallback to Gemini body text repaired with inline glyphs
+    if "body_text" in merged_dict and str(merged_dict["body_text"]).strip():
+        # Prefer Gemini Vision body text (preserves PUA action icons, clean tables, and column boundaries)
         raw_body = clean_extraction_artifacts(apply_inline_repairs(str(merged_dict["body_text"])))
+    elif docling_body and docling_body.strip():
+        # Fallback to Docling layout text if Gemini omitted body_text
+        raw_body = clean_extraction_artifacts(apply_inline_repairs(docling_body))
 
     if raw_body:
         mech_text, ex_text = split_mechanics_and_examples(raw_body)

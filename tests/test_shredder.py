@@ -8,6 +8,7 @@ import yaml
 from ttrpg_markdown_pipeline.processors.shredder import (
     clean_extraction_artifacts,
     consolidate_concepts,
+    instantiate_okf_concept,
     parse_gemini_json_payload,
     sanitize_slug,
     shred_chapter,
@@ -390,3 +391,36 @@ def test_consolidate_adventure_nodes_and_lore():
     assert "Highstorms" in merged_lore["key_themes"]
     assert "Spren" in merged_lore["key_themes"]
     assert len(merged_lore["adventure_hooks"]) == 2
+
+
+def test_split_mechanics_and_examples_preserves_stat_block_labels():
+    companion_stat_block = (
+        "Synthetic Companion - Small Construct\n\n"
+        "Deflect: 2 (plating)\n\n"
+        "Movement: 30 ft., climb 20 ft.\n\n"
+        "Senses: 20 ft. (darkvision)\n\n"
+        "Physical Skills: Agility +4\n\n"
+        "Spiritual Skills: Insight +3, Perception +4\n\n"
+        "Languages: understands trade tongue, but cannot speak"
+    )
+    mech, example = split_mechanics_and_examples(companion_stat_block)
+    assert example is None
+    assert "Deflect: 2 (plating)" in mech
+    assert "Movement: 30 ft., climb 20 ft." in mech
+    assert "Physical Skills: Agility +4" in mech
+    assert "Languages: understands trade tongue" in mech
+
+
+def test_instantiate_okf_concept_prefers_gemini_body_over_docling():
+    item = {
+        "name": "Stone Shaping",
+        "type": "rule",
+        "sourcebook": "Sample Rulebook",
+        "action_cost": "1 Action",
+        "body_text": "Use [1 Action] to mold stone into a simple tool.",
+    }
+    noisy_docling = "Use  to mold stone into a simple tool.\n\nILLUSTRATOR CREDIT\n\nChapter 6: Powers"
+    concept = instantiate_okf_concept(item, docling_body=noisy_docling)
+    assert "Use [1 Action] to mold stone" in concept.body_text
+    assert "ILLUSTRATOR CREDIT" not in concept.body_text
+    assert "Chapter 6: Powers" not in concept.body_text
