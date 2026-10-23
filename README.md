@@ -62,25 +62,23 @@ ttrpg-pipeline "path/to/rulebook.pdf" [OPTIONS]
 | `-s`, `--sourcebook <NAME>` | Sourcebook name for OKF concept namespacing (default: `Cosmere RPG`). |
 | `-f`, `--force` | Force re-extraction and overwrite existing cached chunks and outputs. |
 | `--no-split` | Process the PDF as a single document without slicing into chapter files. |
-| `--all-mechanics` | Extract OKF concepts for all chapters, bypassing keyword routing. |
-| `--include-lore` | Extract worldbuilding, factions, and lore chapters into `OKFLoreEntry` concepts (`lore/`, `factions/`, `locations/`). |
+| `--all-mechanics` | Force OKF extraction across all chapters, overriding even the metadata denylist. |
+| `--include-lore` | Explicitly route lore-dedicated chapters through `LORE_PROMPT`. |
 | `--adventure-mode` | Parse interactive adventure scenes into state-machine `OKFAdventureNode` concepts and compile a GM Campaign Guide. |
 | `--docling-only` | Bypass Gemini Vision and OKF shredding (useful if offline or out of quota). |
-| `--chunk-size <INT>` | Number of pages per Gemini Vision batch (default: `8`). |
-| `--strategy {quality,quota}` | Model cascade strategy: `quality` (Flash) or `quota` (Flash-Lite). |
+| `--chunk-size <INT>` | Number of pages per Gemini Vision batch with 1-page overlap (default: `5`). |
+| `--strategy {pro,quality,quota}` | Model cascade strategy: `pro` (Pro), `quality` (Flash), or `quota` (Flash-Lite). |
 | `--concurrency <INT>` | Maximum concurrent async chunk requests to Gemini API (default: `2`). |
 
-### How the Orchestrator Routes Chapters
+### How the Orchestrator Routes Chapters (Denylist Architecture)
 
-The orchestrator inspects each chapter title in the Table of Contents and routes it dynamically:
-- **Mechanics Chapters** (containing keywords like `path`, `arts`, `combat`, `item`, `adversar`, `equipment`, `expertise`):
-  Runs Docling $\rightarrow$ Async Gemini Vision (`DEFAULT_PROMPT`) $\rightarrow$ OKF Shredder $\rightarrow$ Cross-Linker $\rightarrow$ Category Bundler.
-- **Adventure Modules / Encounters** (activated with `--adventure-mode` or titles containing `part `, `scene`, `act `, `adventure`):
+Rather than relying on a fragile allowlist of chapter names, the orchestrator uses a **Fidelity-First Denylist** (`CHAPTER_DENYLIST`):
+- **Substantive Game Chapters (Default)**:
+  Every chapter not on the metadata denylist runs through the full pipeline: Docling $\rightarrow$ Async Gemini Vision (`UNIFIED_PROMPT` with 5-page overlapping chunks) $\rightarrow$ OKF Shredder (extracting both mechanical `rules/`, `talents/`, `items/`, `weapons/`, `armors/`, `adversaries/` **and** narrative `lore/`, `factions/`, `locations/` in a single pass) $\rightarrow$ Idempotent First-Mention Cross-Linker $\rightarrow$ Category Bundler.
+- **Adventure Modules / Encounters** (`--adventure-mode`):
   Runs Docling $\rightarrow$ Async Gemini Vision (`ADVENTURE_PROMPT`) $\rightarrow$ Shreds into state-machine `adventure_nodes/` $\rightarrow$ Compiles `<Sourcebook>_GM_Campaign_Guide.md` with GM referee protocol.
-- **Worldbuilding & Lore Chapters** (activated with `--include-lore` or titles containing `world`, `lore`, `history`, `faction`, `setting`):
-  Runs Docling $\rightarrow$ Async Gemini Vision (`LORE_PROMPT`) $\rightarrow$ Shreds into modular `lore/`, `factions/`, and `locations/` with `key_themes` and `adventure_hooks`.
-- **Narrative Fallback**:
-  Runs Docling $\rightarrow$ Universal Glyph Patch $\rightarrow$ `<Chapter> - DOCLING.md`.
+- **Non-Content Metadata Denylist** (`credits`, `contents`, `table of contents`, `acknowledgments`, `character sheet`, `index`, `glossary`):
+  Runs Docling $\rightarrow$ Universal Glyph Patch $\rightarrow$ `<Chapter> - DOCLING.md` (bypassing Gemini Vision unless `--all-mechanics` is set).
 
 ---
 
