@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pymupdf
 from google import genai
@@ -39,6 +39,7 @@ _EXHAUSTED_MODELS: set[str] = set()
 QUOTA_STATE_FILE = Path(".gemini_quota_state.json")
 
 CHUNK_BOUNDARY_SENTINEL = "\n\n<!-- OKF_CHUNK_BOUNDARY -->\n\n"
+MAX_INLINE_PDF_BYTES = 18 * 1024 * 1024
 
 DEFAULT_GENERATION_CONFIG = types.GenerateContentConfig(
     temperature=0.1,
@@ -46,6 +47,18 @@ DEFAULT_GENERATION_CONFIG = types.GenerateContentConfig(
     response_mime_type="application/json",
     thinking_config=types.ThinkingConfig(thinking_budget=2048),
 )
+
+
+def build_generation_config(attempt: int) -> types.GenerateContentConfig:
+    """Returns generation config with tighter thinking budget on retry attempts."""
+    if attempt > 1:
+        return types.GenerateContentConfig(
+            temperature=0.1,
+            max_output_tokens=65536,
+            response_mime_type="application/json",
+            thinking_config=types.ThinkingConfig(thinking_budget=1024),
+        )
+    return DEFAULT_GENERATION_CONFIG
 
 
 def is_valid_json_chunk(text: str) -> bool:
@@ -63,6 +76,25 @@ def is_valid_json_chunk(text: str) -> bool:
         return isinstance(data, list) and all(isinstance(item, dict) for item in data)
     except Exception:
         return False
+
+
+def parse_json_chunk(text: str) -> list[dict[str, Any]]:
+    """Parses text containing a JSON list of dictionaries, stripping optional code fences."""
+    if not text or not text.strip():
+        return []
+    candidate = text.strip()
+    # Strip optional markdown code fences
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate)
+        candidate = re.sub(r"\s*```$", "", candidate)
+        candidate = candidate.strip()
+    try:
+        data = json.loads(candidate)
+        if isinstance(data, list) and all(isinstance(item, dict) for item in data):
+            return data
+    except Exception:
+        pass
+    return []
 
 
 def _safe_int(val: Any) -> int:
@@ -519,9 +551,6 @@ def record_model_exhaustion(
     newly_added = model not in _EXHAUSTED_MODELS
     _EXHAUSTED_MODELS.add(model)
 
-    if "PYTEST_CURRENT_TEST" in os.environ and path is None:
-        return newly_added
-
     state_file = path or QUOTA_STATE_FILE
     try:
         state: dict[str, Any] = {}
@@ -677,6 +706,100 @@ def _next_available_model(model_pool: list[str], current_idx: int) -> str:
     return "<none (pool exhausted)>"
 
 
+def validate_and_record_response(
+    response: Any,
+    model: str,
+    latency_s: float,
+    *,
+    attempt: int,
+    model_pool: list[str],
+    idx: int,
+    require_json: bool = False,
+    report: RunReport | None = None,
+    context: str = "",
+) -> tuple[Literal["ok", "retry", "cascade"], str | None, dict[str, Any]]:
+    """Validates response text, finish reason, and format, recording telemetry.
+
+    Returns (action, response_text, usage_dict) where action is 'ok', 'retry', or 'cascade'.
+    """
+    active_report = report or _GLOBAL_RUN_REPORT
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if not response or not getattr(response, "text", None):
+        next_model = _next_available_model(model_pool, idx)
+        print(f"[{ts}] [!] {model} returned an empty response. Cascading to {next_model}...")
+        active_report.record_error(
+            timestamp=ts,
+            context=context,
+            model=model,
+            error_type="empty_response",
+            status_code=None,
+            quota_id=None,
+            quota_limit=None,
+            retry_delay=None,
+            message="Model returned empty response text",
+            resolution=f"Cascaded to {next_model}",
+        )
+        active_report.record_switch(
+            timestamp=ts,
+            context=context,
+            from_model=model,
+            to_model=next_model,
+            error_type="empty_response",
+            reason="Model returned empty response text",
+            marked_exhausted=False,
+        )
+        return "cascade", None, {}
+
+    raw_text = response.text
+    usage = extract_response_usage(response)
+    is_max_tokens = usage.get("finish_reason") == "MAX_TOKENS"
+    is_invalid_json = require_json and not is_valid_json_chunk(raw_text)
+
+    if is_max_tokens or is_invalid_json:
+        err_type = "truncated_max_tokens" if is_max_tokens else "invalid_json_output"
+        print(f"[{ts}] [!] {model} returned {err_type} (finish={usage.get('finish_reason')}).")
+        if attempt == 1:
+            print(f"[{ts}] Retrying {model} with tighter thinking budget (1024)...")
+            return "retry", None, usage
+
+        next_model = _next_available_model(model_pool, idx)
+        active_report.record_error(
+            timestamp=ts,
+            context=context,
+            model=model,
+            error_type=err_type,
+            status_code=None,
+            quota_id=None,
+            quota_limit=None,
+            retry_delay=None,
+            message=f"Model output failed validation: {err_type}",
+            resolution=f"Cascaded to {next_model}",
+        )
+        active_report.record_switch(
+            timestamp=ts,
+            context=context,
+            from_model=model,
+            to_model=next_model,
+            error_type=err_type,
+            reason=f"Model output failed validation ({err_type})",
+            marked_exhausted=False,
+        )
+        return "cascade", None, usage
+
+    # Success: record in telemetry and log
+    recorded_usage = active_report.record_success(model, response, latency_s=latency_s)
+    if recorded_usage["total_tokens"] > 0:
+        ctx_prefix = f"{context} " if context else ""
+        print(
+            f"[{ts}] {ctx_prefix}Usage ({model}): "
+            f"prompt={recorded_usage['prompt_tokens']:,}, output={recorded_usage['candidates_tokens']:,}, "
+            f"thoughts={recorded_usage['thoughts_tokens']:,}, total={recorded_usage['total_tokens']:,} "
+            f"tokens | finish={recorded_usage['finish_reason']} | {latency_s:.1f}s"
+        )
+    return "ok", raw_text.strip(), recorded_usage
+
+
 def generate_with_fallback(
     client: genai.Client,
     contents: list,
@@ -703,15 +826,7 @@ def generate_with_fallback(
         for attempt in range(1, 6):
             active_report.record_attempt(model)
             t0 = time.monotonic()
-            config_to_use = DEFAULT_GENERATION_CONFIG
-            if attempt > 1:
-                # Tighter thinking budget on retries to grant candidate output headroom
-                config_to_use = types.GenerateContentConfig(
-                    temperature=0.1,
-                    max_output_tokens=65536,
-                    response_mime_type="application/json",
-                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
-                )
+            config_to_use = build_generation_config(attempt)
             try:
                 response = client.models.generate_content(
                     model=model,
@@ -719,73 +834,25 @@ def generate_with_fallback(
                     config=config_to_use,
                 )
                 latency_s = time.monotonic() - t0
-                if response.text:
-                    usage = extract_response_usage(response)
-                    is_max_tokens = usage.get("finish_reason") == "MAX_TOKENS"
-                    is_invalid_json = require_json and not is_valid_json_chunk(response.text)
-
-                    if is_max_tokens or is_invalid_json:
-                        err_type = "truncated_max_tokens" if is_max_tokens else "invalid_json_output"
-                        ts_err = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        print(f"[{ts_err}] [!] {model} returned {err_type} (finish={usage.get('finish_reason')}).")
-                        if attempt == 1:
-                            print(f"[{ts_err}] Retrying {model} with tighter thinking budget (1024)...")
-                            continue
-
-                        next_model = _next_available_model(model_pool, idx)
-                        active_report.record_error(
-                            timestamp=ts_err,
-                            context=context,
-                            model=model,
-                            error_type=err_type,
-                            status_code=None,
-                            quota_id=None,
-                            quota_limit=None,
-                            retry_delay=None,
-                            message=f"Model output failed validation: {err_type}",
-                            resolution=f"Cascaded to {next_model}",
-                        )
-                        active_report.record_switch(
-                            timestamp=ts_err,
-                            context=context,
-                            from_model=model,
-                            to_model=next_model,
-                            error_type=err_type,
-                            reason=f"Model output failed validation ({err_type})",
-                            marked_exhausted=False,
-                        )
-                        break
-
-                    active_report.record_success(model, response, latency_s=latency_s)
-                    return response.text.strip(), model
-
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                next_model = _next_available_model(model_pool, idx)
-                print(f"[{ts}] [!] {model} returned an empty response. Cascading to {next_model}...")
-                active_report.record_error(
-                    timestamp=ts,
-                    context=context,
+                action, text, usage = validate_and_record_response(
+                    response=response,
                     model=model,
-                    error_type="empty_response",
-                    status_code=None,
-                    quota_id=None,
-                    quota_limit=None,
-                    retry_delay=None,
-                    message="Model returned empty response text",
-                    resolution=f"Cascaded to {next_model}",
-                )
-                active_report.record_switch(
-                    timestamp=ts,
+                    latency_s=latency_s,
+                    attempt=attempt,
+                    model_pool=model_pool,
+                    idx=idx,
+                    require_json=require_json,
+                    report=active_report,
                     context=context,
-                    from_model=model,
-                    to_model=next_model,
-                    error_type="empty_response",
-                    reason="Model returned empty response text",
-                    marked_exhausted=False,
                 )
-                break
+                if action == "ok" and text is not None:
+                    return text, model
+                if action == "retry":
+                    continue
+                if action == "cascade":
+                    break
             except errors.APIError as e:
-                action, backoff = handle_generation_api_error(
+                err_action, backoff = handle_generation_api_error(
                     e,
                     model=model,
                     model_pool=model_pool,
@@ -794,7 +861,7 @@ def generate_with_fallback(
                     context=context,
                     report=active_report,
                 )
-                if action == "cascade":
+                if err_action == "cascade":
                     break
                 time.sleep(backoff)
 
@@ -834,6 +901,7 @@ def extract_pdf(
     model_pool: list[str] | None = None,
     strategy: str = "quality",
     client: genai.Client | None = None,
+    max_inline_bytes: int = MAX_INLINE_PDF_BYTES,
 ) -> Path:
     """Extract a PDF to Markdown via Gemini Vision, chunked and cached per output file.
 
@@ -893,9 +961,7 @@ def extract_pdf(
                 pdf_bytes = chunk_doc.tobytes()
                 chunk_doc.close()
 
-                use_file_api = len(pdf_bytes) > 18 * 1024 * 1024 or (
-                    hasattr(client, "files") and type(getattr(client.files, "upload", None)).__name__ == "MagicMock"
-                )
+                use_file_api = len(pdf_bytes) > max_inline_bytes
 
                 if not use_file_api:
                     content_item = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")

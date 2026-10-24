@@ -4,6 +4,24 @@ from pathlib import Path
 import pymupdf
 import pytest
 
+import ttrpg_markdown_pipeline.extractors.gemini as gemini_mod
+from ttrpg_markdown_pipeline.extractors.api import _MODEL_PROBE_LOCKS, _VERIFIED_WORKING_MODELS
+from ttrpg_markdown_pipeline.extractors.gemini import _EXHAUSTED_MODELS
+
+
+@pytest.fixture(autouse=True)
+def isolate_quota_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Isolates quota state and resets mutable model sets across tests."""
+    test_state_file = tmp_path / ".gemini_quota_state.json"
+    monkeypatch.setattr(gemini_mod, "QUOTA_STATE_FILE", test_state_file)
+    _EXHAUSTED_MODELS.clear()
+    _VERIFIED_WORKING_MODELS.clear()
+    _MODEL_PROBE_LOCKS.clear()
+    yield
+    _EXHAUSTED_MODELS.clear()
+    _VERIFIED_WORKING_MODELS.clear()
+    _MODEL_PROBE_LOCKS.clear()
+
 
 @pytest.fixture
 def sample_pdf_with_toc(tmp_path: Path) -> Generator[Path, None, None]:

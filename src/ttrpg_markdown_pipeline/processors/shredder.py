@@ -99,13 +99,33 @@ def _parse_vault_markdown_body(raw_body_section: str) -> tuple[str, str | None]:
         unlinked,
         flags=re.IGNORECASE,
     )
-    body_part = re.sub(
-        r"^###\s+Mechanics[ \t]*(?:\r?\n)+",
+    main_section = ex_parts[0].strip()
+    example_part = "\n\n".join(p.strip() for p in ex_parts[1:] if p.strip()) or None
+
+    # Truncate rendered trailer subsections that are stored in YAML frontmatter
+    trailer_pattern = (
+        r"(?:^|\r?\n)###\s+"
+        r"(?:Adventure Hooks|Skill Checks|Choices & Branches|Journal Prompts|State & Sheet Mutations)"
+        r"[ \t]*(?:\r?\n)+"
+    )
+    main_section = re.split(trailer_pattern, main_section, flags=re.IGNORECASE)[0].strip()
+
+    # Strip leading read-aloud block if present
+    main_section = re.sub(
+        r"^###\s+Read-Aloud[ \t]*(?:\r?\n)+(?:>[^\n]*\r?\n?)*",
         "",
-        ex_parts[0].strip(),
+        main_section,
         flags=re.IGNORECASE,
     ).strip()
-    example_part = "\n\n".join(p.strip() for p in ex_parts[1:] if p.strip()) or None
+
+    # Strip leading standard section headings
+    body_part = re.sub(
+        r"^###\s+(?:Mechanics|Lore & Worldbuilding|Description|Scene & Mechanics)[ \t]*(?:\r?\n)+",
+        "",
+        main_section,
+        flags=re.IGNORECASE,
+    ).strip()
+
     return body_part, example_part
 
 
@@ -513,13 +533,54 @@ def consolidate_concepts(concepts: list[dict[str, Any]]) -> list[dict[str, Any]]
 
     candidates = list(grouped.values())
 
+    # Procedural Category Roll-Up pass: roll child rules whose category matches a parent procedural rule into the parent
+    rolled_up_indices: set[int] = set()
+    for j, parent in enumerate(candidates):
+        p_type = str(parent.get("type", "rule")).lower()
+        if p_type != "rule" or parent.get("action_cost"):
+            continue
+        p_name = str(parent.get("name", "")).strip()
+        if not p_name:
+            continue
+        p_name_lower = p_name.lower()
+
+        for i, child in enumerate(candidates):
+            if i == j or i in rolled_up_indices:
+                continue
+            c_type = str(child.get("type", "rule")).lower()
+            if c_type != "rule" or child.get("action_cost"):
+                continue
+            c_cat = str(child.get("category", "")).strip().lower()
+            if c_cat and c_cat == p_name_lower:
+                c_name = str(child.get("name", "")).strip()
+                c_body = str(child.get("body_text", "")).strip()
+                p_body = str(parent.get("body_text", "")).strip()
+
+                norm_parent = _normalize_for_subsumption(p_body)
+                norm_child = _normalize_for_subsumption(c_body)
+                if c_body and (not norm_child or norm_child not in norm_parent):
+                    heading = f"### {c_name}"
+                    parent["body_text"] = (
+                        f"{p_body}\n\n{heading}\n\n{c_body}".strip() if p_body else f"{heading}\n\n{c_body}"
+                    )
+
+                child_ex = str(child.get("example_text") or "").strip()
+                if child_ex:
+                    parent_ex = str(parent.get("example_text") or "").strip()
+                    if not parent_ex:
+                        parent["example_text"] = child_ex
+                    elif child_ex not in parent_ex:
+                        parent["example_text"] = f"{parent_ex}\n\n{child_ex}"
+
+                rolled_up_indices.add(i)
+
     # Subsumption deduplication pass: drop child concepts subsumed by a parent rule/lore
     subsumed_indices: set[int] = set()
     for i, child in enumerate(candidates):
-        if i in subsumed_indices:
+        if i in subsumed_indices or i in rolled_up_indices:
             continue
         for j, parent in enumerate(candidates):
-            if i == j or j in subsumed_indices:
+            if i == j or j in subsumed_indices or j in rolled_up_indices:
                 continue
             if _is_subsumed_rule(child, parent):
                 child_ex = str(child.get("example_text") or "").strip()
@@ -532,7 +593,20 @@ def consolidate_concepts(concepts: list[dict[str, Any]]) -> list[dict[str, Any]]
                 subsumed_indices.add(i)
                 break
 
-    return [item for idx, item in enumerate(candidates) if idx not in subsumed_indices]
+    filtered_candidates: list[dict[str, Any]] = []
+    for idx, item in enumerate(candidates):
+        if idx in subsumed_indices or idx in rolled_up_indices:
+            continue
+        c_type = str(item.get("type", "rule")).lower()
+        if c_type in ("lore", "faction", "location"):
+            body_len = len(str(item.get("body_text", "")).strip())
+            hooks = item.get("adventure_hooks")
+            has_hooks = bool(isinstance(hooks, list) and any(str(h).strip() for h in hooks))
+            if body_len < 100 and not has_hooks:
+                continue
+        filtered_candidates.append(item)
+
+    return filtered_candidates
 
 
 def shred_chapter(
@@ -647,7 +721,11 @@ def shred_chapter(
                             child_body, _ = _parse_vault_markdown_body(child_parts[2])
                             child_item = dict(child_meta)
                             child_item["body_text"] = child_body
-                            if _is_subsumed_rule(child_item, item):
+                            norm_parent = _normalize_for_subsumption(str(item.get("body_text", "")))
+                            norm_child = _normalize_for_subsumption(child_body)
+                            if _is_subsumed_rule(child_item, item) or (
+                                child_slug in candidate_child_slugs and norm_child and norm_child in norm_parent
+                            ):
                                 child_path.unlink()
                                 logger.info("Cleaned up orphaned subsumed child concept: %s", child_path.name)
                                 if child_path in saved_files:

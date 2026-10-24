@@ -18,9 +18,9 @@ from ttrpg_markdown_pipeline.common import load_env_file
 from ttrpg_markdown_pipeline.extractors.gemini import (
     _EXHAUSTED_MODELS,
     CHUNK_BOUNDARY_SENTINEL,
-    DEFAULT_GENERATION_CONFIG,
+    MAX_INLINE_PDF_BYTES,
     RunReport,
-    _next_available_model,
+    build_generation_config,
     chunk_file_for,
     compute_chunk_ranges,
     discover_model_pool,
@@ -28,11 +28,70 @@ from ttrpg_markdown_pipeline.extractors.gemini import (
     handle_generation_api_error,
     is_valid_json_chunk,
     load_persisted_quota_state,
+    parse_json_chunk,
+    validate_and_record_response,
 )
 from ttrpg_markdown_pipeline.rules.cosmere import DEFAULT_PROMPT
 
 _VERIFIED_WORKING_MODELS: set[str] = set()
 _MODEL_PROBE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+async def _try_model_with_retries_async(
+    client: genai.Client,
+    model: str,
+    contents: list,
+    model_pool: list[str],
+    idx: int,
+    *,
+    context: str = "",
+    report: RunReport | None = None,
+    require_json: bool = False,
+) -> tuple[str, str] | None:
+    """Runs retry loop for a single model, returning (text, model) on success or None on cascade."""
+    active_report = report or get_run_report()
+    for attempt in range(1, 6):
+        active_report.record_attempt(model)
+        t0 = time.monotonic()
+        config_to_use = build_generation_config(attempt)
+        try:
+            response = await client.aio.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config_to_use,
+            )
+            latency_s = time.monotonic() - t0
+            action, text, _ = validate_and_record_response(
+                response=response,
+                model=model,
+                latency_s=latency_s,
+                attempt=attempt,
+                model_pool=model_pool,
+                idx=idx,
+                require_json=require_json,
+                report=active_report,
+                context=context,
+            )
+            if action == "ok" and text is not None:
+                return text, model
+            if action == "retry":
+                continue
+            if action == "cascade":
+                return None
+        except errors.APIError as e:
+            err_action, backoff = handle_generation_api_error(
+                e,
+                model=model,
+                model_pool=model_pool,
+                idx=idx,
+                attempt=attempt,
+                context=context,
+                report=active_report,
+            )
+            if err_action == "cascade":
+                return None
+            await asyncio.sleep(backoff)
+    return None
 
 
 async def generate_with_fallback_async(
@@ -61,220 +120,107 @@ async def generate_with_fallback_async(
             async with probe_lock:
                 if model in _EXHAUSTED_MODELS:
                     continue
-                # Single-flight probe on unverified model
-                for attempt in range(1, 6):
-                    active_report.record_attempt(model)
-                    t0 = time.monotonic()
-                    config_to_use = DEFAULT_GENERATION_CONFIG
-                    if attempt > 1:
-                        config_to_use = types.GenerateContentConfig(
-                            temperature=0.1,
-                            max_output_tokens=65536,
-                            response_mime_type="application/json",
-                            thinking_config=types.ThinkingConfig(thinking_budget=1024),
-                        )
-                    try:
-                        response = await client.aio.models.generate_content(
-                            model=model,
-                            contents=contents,
-                            config=config_to_use,
-                        )
-                        latency_s = time.monotonic() - t0
-                        if response.text:
-                            usage = active_report.record_success(model, response, latency_s=latency_s)
-                            is_max_tokens = usage.get("finish_reason") == "MAX_TOKENS"
-                            is_invalid_json = require_json and not is_valid_json_chunk(response.text)
+                if model not in _VERIFIED_WORKING_MODELS:
+                    res = await _try_model_with_retries_async(
+                        client=client,
+                        model=model,
+                        contents=contents,
+                        model_pool=model_pool,
+                        idx=idx,
+                        context=context,
+                        report=active_report,
+                        require_json=require_json,
+                    )
+                    if res is not None:
+                        _VERIFIED_WORKING_MODELS.add(model)
+                        return res
+                    continue
 
-                            if is_max_tokens or is_invalid_json:
-                                err_type = "truncated_max_tokens" if is_max_tokens else "invalid_json_output"
-                                ts_err = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                print(
-                                    f"[{ts_err}] [!] {model} returned {err_type} (finish={usage.get('finish_reason')})."
-                                )
-                                if attempt == 1:
-                                    print(f"[{ts_err}] Retrying {model} with tighter thinking budget (1024)...")
-                                    continue
-
-                                next_model = _next_available_model(model_pool, idx)
-                                active_report.record_error(
-                                    timestamp=ts_err,
-                                    context=context,
-                                    model=model,
-                                    error_type=err_type,
-                                    status_code=None,
-                                    quota_id=None,
-                                    quota_limit=None,
-                                    retry_delay=None,
-                                    message=f"Model output failed validation: {err_type}",
-                                    resolution=f"Cascaded to {next_model}",
-                                )
-                                active_report.record_switch(
-                                    timestamp=ts_err,
-                                    context=context,
-                                    from_model=model,
-                                    to_model=next_model,
-                                    error_type=err_type,
-                                    reason=f"Model output failed validation ({err_type})",
-                                    marked_exhausted=False,
-                                )
-                                break
-
-                            _VERIFIED_WORKING_MODELS.add(model)
-                            if usage["total_tokens"] > 0:
-                                ts_done = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                print(
-                                    f"[{ts_done}] {context + ' ' if context else ''}Usage ({model}): "
-                                    f"prompt={usage['prompt_tokens']:,}, output={usage['candidates_tokens']:,}, "
-                                    f"thoughts={usage['thoughts_tokens']:,}, total={usage['total_tokens']:,} "
-                                    f"tokens | finish={usage['finish_reason']} | {latency_s:.1f}s"
-                                )
-                            return response.text.strip(), model
-
-                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        next_model = _next_available_model(model_pool, idx)
-                        print(f"[{ts}] [!] {model} returned an empty response. Cascading to {next_model}...")
-                        active_report.record_error(
-                            timestamp=ts,
-                            context=context,
-                            model=model,
-                            error_type="empty_response",
-                            status_code=None,
-                            quota_id=None,
-                            quota_limit=None,
-                            retry_delay=None,
-                            message="Model returned empty response text",
-                            resolution=f"Cascaded to {next_model}",
-                        )
-                        active_report.record_switch(
-                            timestamp=ts,
-                            context=context,
-                            from_model=model,
-                            to_model=next_model,
-                            error_type="empty_response",
-                            reason="Model returned empty response text",
-                            marked_exhausted=False,
-                        )
-                        break
-                    except errors.APIError as e:
-                        action, backoff = handle_generation_api_error(
-                            e,
-                            model=model,
-                            model_pool=model_pool,
-                            idx=idx,
-                            attempt=attempt,
-                            context=context,
-                            report=active_report,
-                        )
-                        if action == "cascade":
-                            break
-                        await asyncio.sleep(backoff)
-                continue
-
-        for attempt in range(1, 6):
-            active_report.record_attempt(model)
-            t0 = time.monotonic()
-            config_to_use = DEFAULT_GENERATION_CONFIG
-            if attempt > 1:
-                # Tighter thinking budget on retries to grant candidate output headroom
-                config_to_use = types.GenerateContentConfig(
-                    temperature=0.1,
-                    max_output_tokens=65536,
-                    response_mime_type="application/json",
-                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
-                )
-            try:
-                response = await client.aio.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=config_to_use,
-                )
-                latency_s = time.monotonic() - t0
-                if response.text:
-                    usage = active_report.record_success(model, response, latency_s=latency_s)
-                    is_max_tokens = usage.get("finish_reason") == "MAX_TOKENS"
-                    is_invalid_json = require_json and not is_valid_json_chunk(response.text)
-
-                    if is_max_tokens or is_invalid_json:
-                        err_type = "truncated_max_tokens" if is_max_tokens else "invalid_json_output"
-                        ts_err = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        print(f"[{ts_err}] [!] {model} returned {err_type} (finish={usage.get('finish_reason')}).")
-                        if attempt == 1:
-                            print(f"[{ts_err}] Retrying {model} with tighter thinking budget (1024)...")
-                            continue
-
-                        next_model = _next_available_model(model_pool, idx)
-                        active_report.record_error(
-                            timestamp=ts_err,
-                            context=context,
-                            model=model,
-                            error_type=err_type,
-                            status_code=None,
-                            quota_id=None,
-                            quota_limit=None,
-                            retry_delay=None,
-                            message=f"Model output failed validation: {err_type}",
-                            resolution=f"Cascaded to {next_model}",
-                        )
-                        active_report.record_switch(
-                            timestamp=ts_err,
-                            context=context,
-                            from_model=model,
-                            to_model=next_model,
-                            error_type=err_type,
-                            reason=f"Model output failed validation ({err_type})",
-                            marked_exhausted=False,
-                        )
-                        break
-
-                    if usage["total_tokens"] > 0:
-                        ts_done = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        print(
-                            f"[{ts_done}] {context + ' ' if context else ''}Usage ({model}): "
-                            f"prompt={usage['prompt_tokens']:,}, output={usage['candidates_tokens']:,}, "
-                            f"thoughts={usage['thoughts_tokens']:,}, total={usage['total_tokens']:,} "
-                            f"tokens | finish={usage['finish_reason']} | {latency_s:.1f}s"
-                        )
-                    return response.text.strip(), model
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                next_model = _next_available_model(model_pool, idx)
-                print(f"[{ts}] [!] {model} returned an empty response. Cascading to {next_model}...")
-                active_report.record_error(
-                    timestamp=ts,
-                    context=context,
-                    model=model,
-                    error_type="empty_response",
-                    status_code=None,
-                    quota_id=None,
-                    quota_limit=None,
-                    retry_delay=None,
-                    message="Model returned empty response text",
-                    resolution=f"Cascaded to {next_model}",
-                )
-                active_report.record_switch(
-                    timestamp=ts,
-                    context=context,
-                    from_model=model,
-                    to_model=next_model,
-                    error_type="empty_response",
-                    reason="Model returned empty response text",
-                    marked_exhausted=False,
-                )
-                break
-            except errors.APIError as e:
-                action, backoff = handle_generation_api_error(
-                    e,
-                    model=model,
-                    model_pool=model_pool,
-                    idx=idx,
-                    attempt=attempt,
-                    context=context,
-                    report=active_report,
-                )
-                if action == "cascade":
-                    break
-                await asyncio.sleep(backoff)
+        # Model is verified (or verified while waiting on lock); run concurrently
+        res = await _try_model_with_retries_async(
+            client=client,
+            model=model,
+            contents=contents,
+            model_pool=model_pool,
+            idx=idx,
+            context=context,
+            report=active_report,
+            require_json=require_json,
+        )
+        if res is not None:
+            return res
 
     raise RuntimeError("All models in the desirability path failed or exhausted quota.")
+
+
+async def _execute_single_slice_async(
+    client: genai.Client,
+    pdf_path: Path,
+    start_idx: int,
+    end_idx: int,
+    total_pages: int,
+    prompt: str,
+    model_pool: list[str],
+    semaphore: asyncio.Semaphore,
+    max_inline_bytes: int = MAX_INLINE_PDF_BYTES,
+) -> tuple[str, str]:
+    """Acquires semaphore and executes generation for a single PDF slice."""
+    label = f"[{start_idx + 1:02d}-{end_idx:02d}/{total_pages}]"
+    async with semaphore:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{ts}] {label} Slicing and preparing chunk...")
+
+        doc = pymupdf.open(pdf_path)
+        chunk_doc = pymupdf.open()
+        chunk_doc.insert_pdf(doc, from_page=start_idx, to_page=end_idx - 1)
+        pdf_bytes = chunk_doc.tobytes()
+        chunk_doc.close()
+        doc.close()
+
+        use_file_api = len(pdf_bytes) > max_inline_bytes
+
+        if not use_file_api:
+            content_item = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+            return await generate_with_fallback_async(
+                client=client,
+                contents=[content_item, prompt],
+                model_pool=model_pool,
+                context=f"{pdf_path.name} {label}",
+                require_json=True,
+            )
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_f:
+                temp_chunk_path = Path(tmp_f.name)
+            try:
+                temp_chunk_path.write_bytes(pdf_bytes)
+                uploaded_file = None
+                for upload_attempt in range(1, 4):
+                    try:
+                        uploaded_file = await asyncio.to_thread(client.files.upload, file=str(temp_chunk_path))
+                        break
+                    except Exception as upload_err:
+                        if upload_attempt == 3:
+                            raise
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        backoff = upload_attempt * 3
+                        print(f"[{ts}] {label} Upload transient error ({upload_err}). Retrying in {backoff}s...")
+                        await asyncio.sleep(backoff)
+
+                try:
+                    return await generate_with_fallback_async(
+                        client=client,
+                        contents=[uploaded_file, prompt],
+                        model_pool=model_pool,
+                        context=f"{pdf_path.name} {label}",
+                        require_json=True,
+                    )
+                finally:
+                    if uploaded_file and getattr(uploaded_file, "name", None):
+                        with contextlib.suppress(Exception):
+                            await asyncio.to_thread(client.files.delete, name=str(uploaded_file.name))
+            finally:
+                if temp_chunk_path.exists():
+                    temp_chunk_path.unlink()
 
 
 async def _process_chunk_async(
@@ -287,6 +233,7 @@ async def _process_chunk_async(
     prompt: str,
     model_pool: list[str],
     semaphore: asyncio.Semaphore,
+    max_inline_bytes: int = MAX_INLINE_PDF_BYTES,
 ) -> str:
     """Processes a single slice of pages asynchronously with caching and concurrency control."""
     chunk_file = chunk_file_for(cache_dir, start_idx, end_idx)
@@ -303,89 +250,60 @@ async def _process_chunk_async(
             print(f"[{ts}] {label} Found cached chunk. Skipping...")
             return cached_text
 
-    async with semaphore:
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{ts}] {label} Slicing and preparing chunk...")
-
-        doc = pymupdf.open(pdf_path)
-        chunk_doc = pymupdf.open()
-        chunk_doc.insert_pdf(doc, from_page=start_idx, to_page=end_idx - 1)
-        pdf_bytes = chunk_doc.tobytes()
-        chunk_doc.close()
-        doc.close()
-
-        use_file_api = len(pdf_bytes) > 18 * 1024 * 1024 or (
-            hasattr(client, "files") and type(getattr(client.files, "upload", None)).__name__ == "MagicMock"
+    try:
+        text, model_used = await _execute_single_slice_async(
+            client=client,
+            pdf_path=pdf_path,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            total_pages=total_pages,
+            prompt=prompt,
+            model_pool=model_pool,
+            semaphore=semaphore,
+            max_inline_bytes=max_inline_bytes,
         )
-
-        try:
-            if not use_file_api:
-                content_item = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
-                text, model_used = await generate_with_fallback_async(
-                    client=client,
-                    contents=[content_item, prompt],
-                    model_pool=model_pool,
-                    context=f"{pdf_path.name} {label}",
-                    require_json=True,
-                )
-            else:
-                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_f:
-                    temp_chunk_path = Path(tmp_f.name)
-                try:
-                    temp_chunk_path.write_bytes(pdf_bytes)
-                    uploaded_file = None
-                    for upload_attempt in range(1, 4):
-                        try:
-                            uploaded_file = await asyncio.to_thread(client.files.upload, file=str(temp_chunk_path))
-                            break
-                        except Exception as upload_err:
-                            if upload_attempt == 3:
-                                raise
-                            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            backoff = upload_attempt * 3
-                            print(f"[{ts}] {label} Upload transient error ({upload_err}). Retrying in {backoff}s...")
-                            await asyncio.sleep(backoff)
-
-                    try:
-                        text, model_used = await generate_with_fallback_async(
-                            client=client,
-                            contents=[uploaded_file, prompt],
-                            model_pool=model_pool,
-                            context=f"{pdf_path.name} {label}",
-                            require_json=True,
-                        )
-                    finally:
-                        if uploaded_file and getattr(uploaded_file, "name", None):
-                            with contextlib.suppress(Exception):
-                                await asyncio.to_thread(client.files.delete, name=str(uploaded_file.name))
-                finally:
-                    if temp_chunk_path.exists():
-                        temp_chunk_path.unlink()
-
-            chunk_file.write_text(text, encoding="utf-8")
+        chunk_file.write_text(text, encoding="utf-8")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{ts}] {label} Successfully processed via {model_used}.")
+        return text
+    except RuntimeError as run_err:
+        if end_idx - start_idx >= 3:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[{ts}] {label} Successfully processed via {model_used}.")
-            return text
-        except RuntimeError as run_err:
-            if end_idx - start_idx >= 3:
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(
-                    f"[{ts}] {label} [!] Chunk failed across models ({run_err}). "
-                    f"Adaptive-splitting pages {start_idx + 1}-{end_idx} in half..."
-                )
-                mid_idx = (start_idx + end_idx) // 2
-                text_a = await _process_chunk_async(
-                    client, pdf_path, start_idx, mid_idx, total_pages, cache_dir, prompt, model_pool, semaphore
-                )
-                text_b = await _process_chunk_async(
-                    client, pdf_path, mid_idx, end_idx, total_pages, cache_dir, prompt, model_pool, semaphore
-                )
-                items_a = json.loads(text_a) if is_valid_json_chunk(text_a) else []
-                items_b = json.loads(text_b) if is_valid_json_chunk(text_b) else []
-                merged_json = json.dumps(items_a + items_b, indent=2)
-                chunk_file.write_text(merged_json, encoding="utf-8")
-                return merged_json
-            raise
+            print(
+                f"[{ts}] {label} [!] Chunk failed across models ({run_err}). "
+                f"Adaptive-splitting pages {start_idx + 1}-{end_idx} in half..."
+            )
+            mid_idx = (start_idx + end_idx) // 2
+            text_a = await _process_chunk_async(
+                client=client,
+                pdf_path=pdf_path,
+                start_idx=start_idx,
+                end_idx=mid_idx,
+                total_pages=total_pages,
+                cache_dir=cache_dir,
+                prompt=prompt,
+                model_pool=model_pool,
+                semaphore=semaphore,
+                max_inline_bytes=max_inline_bytes,
+            )
+            text_b = await _process_chunk_async(
+                client=client,
+                pdf_path=pdf_path,
+                start_idx=mid_idx,
+                end_idx=end_idx,
+                total_pages=total_pages,
+                cache_dir=cache_dir,
+                prompt=prompt,
+                model_pool=model_pool,
+                semaphore=semaphore,
+                max_inline_bytes=max_inline_bytes,
+            )
+            items_a = parse_json_chunk(text_a)
+            items_b = parse_json_chunk(text_b)
+            merged_json = json.dumps(items_a + items_b, indent=2)
+            chunk_file.write_text(merged_json, encoding="utf-8")
+            return merged_json
+        raise
 
 
 async def extract_pdf_async(
@@ -399,6 +317,7 @@ async def extract_pdf_async(
     strategy: str = "quality",
     max_concurrency: int = 3,
     client: genai.Client | None = None,
+    max_inline_bytes: int = MAX_INLINE_PDF_BYTES,
 ) -> Path:
     """Asynchronously extracts a PDF with concurrent chunk processing."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -438,6 +357,7 @@ async def extract_pdf_async(
             prompt=prompt,
             model_pool=model_pool,
             semaphore=semaphore,
+            max_inline_bytes=max_inline_bytes,
         )
         for s, e in chunk_ranges
     ]

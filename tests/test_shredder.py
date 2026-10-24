@@ -603,3 +603,119 @@ def test_shred_chapter_orphan_cleanup(tmp_path: Path):
     # The orphaned child file was removed
     assert not orphan_file.exists()
     assert orphan_file not in saved
+
+
+def test_consolidate_concepts_procedural_category_rollup():
+    """Verifies that child rules matching a parent procedural rule's category roll into parent ### headings."""
+    concepts = [
+        {
+            "name": "Step 5: Talents",
+            "type": "rule",
+            "category": "Character Creation",
+            "body_text": "Select your heroic talents.",
+        },
+        {
+            "name": "Gain Your Key Talent",
+            "type": "rule",
+            "category": "Step 5: Talents",
+            "body_text": "You gain your path's key talent automatically.",
+            "example_text": "GM: You gain Shardblade Master.",
+        },
+        {
+            "name": "Choose an Ancestry Talent",
+            "type": "rule",
+            "category": "Step 5: Talents",
+            "body_text": "Pick one talent from your ancestry list.",
+        },
+        {
+            "name": "Strike",
+            "type": "rule",
+            "category": "Combat Actions",
+            "action_cost": "[1 Action]",
+            "body_text": "Make a weapon attack.",
+        },
+        {
+            "name": "Ghostbloods",
+            "type": "faction",
+            "category": "Factions",
+            "body_text": "A covert Cosmere organization.",  # < 100 chars and no hooks -> filtered
+        },
+    ]
+
+    consolidated = consolidate_concepts(concepts)
+    # The 2 child rules rolled into parent, ghostbloods stub filtered, strike retained
+    assert len(consolidated) == 2
+
+    step5 = next(c for c in consolidated if c["name"] == "Step 5: Talents")
+    assert "### Gain Your Key Talent" in step5["body_text"]
+    assert "You gain your path's key talent automatically." in step5["body_text"]
+    assert "### Choose an Ancestry Talent" in step5["body_text"]
+    assert "Pick one talent from your ancestry list." in step5["body_text"]
+    assert "Shardblade Master" in step5["example_text"]
+
+    strike = next(c for c in consolidated if c["name"] == "Strike")
+    assert strike["action_cost"] == "[1 Action]"
+
+
+def test_parse_vault_markdown_body_lore_and_adventure_idempotent():
+    """Verifies that _parse_vault_markdown_body strips rendered headings & trailers for idempotent re-saving."""
+    from ttrpg_markdown_pipeline.models import OKFAdventureNode, OKFLoreEntry
+    from ttrpg_markdown_pipeline.processors.shredder import _parse_vault_markdown_body
+
+    # 1. OKFLoreEntry idempotency
+    lore = OKFLoreEntry(
+        schema_version="1.0.0",
+        sourcebook="Roshar Guide",
+        name="Urithiru",
+        category="Locations",
+        key_themes=["Ancient City", "Radiants"],
+        adventure_hooks=["Reactivate the crystal pillar.", "Explore the oathgates."],
+        body_text="Urithiru is a massive city of stone constructed high in the mountains.",
+        example_text="Shallan: The tower is breathtaking.",
+    )
+    md_1 = lore.to_markdown()
+    parts_1 = md_1.split("---\n", 2)
+    body_clean_1, ex_clean_1 = _parse_vault_markdown_body(parts_1[2])
+
+    assert "### Lore & Worldbuilding" not in body_clean_1
+    assert "### Adventure Hooks" not in body_clean_1
+    assert "Urithiru is a massive city" in body_clean_1
+    assert "Shallan: The tower is breathtaking." in (ex_clean_1 or "")
+
+    lore_reloaded = OKFLoreEntry(
+        schema_version="1.0.0",
+        sourcebook="Roshar Guide",
+        name="Urithiru",
+        category="Locations",
+        key_themes=["Ancient City", "Radiants"],
+        adventure_hooks=["Reactivate the crystal pillar.", "Explore the oathgates."],
+        body_text=body_clean_1,
+        example_text=ex_clean_1,
+    )
+    md_2 = lore_reloaded.to_markdown()
+    # Sections must appear exactly once
+    assert md_2.count("### Lore & Worldbuilding") == 1
+    assert md_2.count("### Adventure Hooks") == 1
+    assert md_2.count("### Example Play") == 1
+
+    # 2. OKFAdventureNode idempotency
+    node = OKFAdventureNode(
+        schema_version="1.0.0",
+        sourcebook="Chasm Solo",
+        name="Chasm Ambush",
+        category="Act 1",
+        node_id="A1",
+        read_aloud="Red eyes gleam in the dark chasm.",
+        body_text="Three chasmfiends approach the expedition party.",
+        skill_checks=[{"skill": "Athletics", "dc": 14, "success": "Climb ledge"}],
+        choices=[{"option": "Run", "target_node": "A2"}],
+    )
+    node_md_1 = node.to_markdown()
+    node_parts_1 = node_md_1.split("---\n", 2)
+    node_body_1, _ = _parse_vault_markdown_body(node_parts_1[2])
+
+    assert "### Read-Aloud" not in node_body_1
+    assert "### Scene & Mechanics" not in node_body_1
+    assert "### Skill Checks" not in node_body_1
+    assert "### Choices & Branches" not in node_body_1
+    assert "Three chasmfiends approach" in node_body_1
