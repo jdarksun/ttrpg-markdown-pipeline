@@ -16,6 +16,7 @@ from typing import Any
 
 import yaml
 
+from ttrpg_markdown_pipeline.extractors.gemini import parse_json_chunk
 from ttrpg_markdown_pipeline.models import (
     OKFAdventureNode,
     OKFAdversary,
@@ -419,33 +420,30 @@ def _salvage_truncated_json_array(chunk_text: str) -> list[dict[str, Any]]:
 
 def _parse_single_chunk_json(chunk_text: str) -> list[dict[str, Any]]:
     """Extracts a JSON list of concept objects from a single Gemini chunk."""
-    items: list[dict[str, Any]] = []
+    cleaned = chunk_text.strip()
+    if not cleaned:
+        return []
 
-    json_blocks = re.findall(r"```(?:json)?\s*(\[.*?\])\s*```", chunk_text, re.DOTALL)
+    # 1. Clean or fenced full-chunk JSON
+    direct = parse_json_chunk(cleaned)
+    if direct:
+        return direct
+
+    # 2. Markdown fenced code blocks
+    items: list[dict[str, Any]] = []
+    json_blocks = re.findall(r"```(?:json)?\s*(\[.*?\])\s*```", cleaned, re.DOTALL)
     for block in json_blocks:
-        try:
-            data = json.loads(block)
-            if isinstance(data, list):
-                items.extend(d for d in data if isinstance(d, dict))
-        except json.JSONDecodeError:
+        parsed = parse_json_chunk(block)
+        if parsed:
+            items.extend(parsed)
+        else:
             items.extend(_salvage_truncated_json_array(block))
 
     if items:
         return items
 
-    raw_lists = re.findall(r"\[\s*\{.*?\}\s*\]", chunk_text, re.DOTALL)
-    for raw in raw_lists:
-        try:
-            data = json.loads(raw)
-            if isinstance(data, list):
-                items.extend(d for d in data if isinstance(d, dict))
-        except json.JSONDecodeError:
-            continue
-
-    if items:
-        return items
-
-    return _salvage_truncated_json_array(chunk_text)
+    # 3. Fallback to salvaging truncated or embedded array
+    return _salvage_truncated_json_array(cleaned)
 
 
 def parse_gemini_json_payload(gemini_raw_text: str) -> list[dict[str, Any]]:

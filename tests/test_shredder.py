@@ -719,3 +719,36 @@ def test_parse_vault_markdown_body_lore_and_adventure_idempotent():
     assert "### Skill Checks" not in node_body_1
     assert "### Choices & Branches" not in node_body_1
     assert "Three chasmfiends approach" in node_body_1
+
+
+def test_parse_gemini_json_payload_nested_arrays_adventure_node():
+    raw_response = (
+        "[\n"
+        "  {\n"
+        '    "schema_version": "1.0.0",\n'
+        '    "sourcebook": "Cosmere RPG - The First Step",\n'
+        '    "type": "adventure_node",\n'
+        '    "name": "Search Gear",\n'
+        '    "category": "Part 1",\n'
+        '    "node_id": "A",\n'
+        '    "read_aloud": "You rummage through your gear.",\n'
+        '    "body_text": "Choose your weapon.",\n'
+        '    "choices": [\n'
+        '      {"option": "A weapon", "target_node": "A1", "condition": null},\n'
+        '      {"option": "A spanreed", "target_node": "A2", "condition": null}\n'
+        "    ],\n"
+        '    "skill_checks": [\n'
+        '      {"skill": "Athletics", "dc": 10, "success": "You climb.", "failure": "You slip."}\n'
+        "    ]\n"
+        "  }\n"
+        "]"
+    )
+    items = parse_gemini_json_payload(raw_response)
+    assert len(items) == 1
+    assert items[0]["type"] == "adventure_node"
+    assert items[0]["name"] == "Search Gear"
+    assert items[0]["node_id"] == "A"
+    assert len(items[0]["choices"]) == 2
+    assert items[0]["choices"][0]["target_node"] == "A1"
+    assert len(items[0]["skill_checks"]) == 1
+    assert items[0]["skill_checks"][0]["dc"] == 10

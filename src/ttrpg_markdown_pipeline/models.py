@@ -122,7 +122,7 @@ class OKFWeapon(OKFConcept):
     damage: str | None = Field(default=None, description="Damage formula or die code")
     range: str | None = Field(default=None, description="Effective range or category (e.g. Melee, 50/100 ft)")
     traits: list[str] = Field(default_factory=list, description="Weapon traits (e.g. Blast, Concealable)")
-    cost: str | None = Field(default=None, description="Item cost or value")
+    cost: str | int | float | None = Field(default=None, description="Item cost or value")
 
 
 class OKFArmor(OKFConcept):
@@ -131,15 +131,15 @@ class OKFArmor(OKFConcept):
     type: Literal["armor"] = "armor"
     deflect: str | int | None = Field(default=None, description="Deflection rating or armor defense")
     traits: list[str] = Field(default_factory=list, description="Armor traits (e.g. Cumbersome)")
-    cost: str | None = Field(default=None, description="Item cost or value")
+    cost: str | int | float | None = Field(default=None, description="Item cost or value")
 
 
 class OKFItem(OKFConcept):
     """Represents general equipment, gear, or consumable."""
 
     type: Literal["item"] = "item"
-    cost: str | None = Field(default=None, description="Item cost or value")
-    weight: str | None = Field(default=None, description="Item weight or bulk")
+    cost: str | int | float | None = Field(default=None, description="Item cost or value")
+    weight: str | int | float | None = Field(default=None, description="Item weight or bulk")
 
 
 class OKFRule(OKFConcept):
@@ -213,7 +213,7 @@ class OKFAdventureNode(OKFConcept):
 
     type: Literal["adventure_node"] = "adventure_node"
     module_name: str | None = Field(default=None, description="Name of the parent adventure module")
-    node_id: str = Field(..., description="Scene or decision node identifier, e.g. 'A1', 'B4', 'Part 1'")
+    node_id: str | int = Field(..., description="Scene or decision node identifier, e.g. 'A1', 'B4', 'Part 1'")
     read_aloud: str | None = Field(default=None, description="Boxed or player-facing read-aloud text")
     skill_checks: list[dict[str, Any]] = Field(default_factory=list, description="Skill tests, DCs, and outcomes")
     state_mutations: list[str] = Field(
