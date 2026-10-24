@@ -7,6 +7,7 @@ import pytest
 from ttrpg_markdown_pipeline.rules.cosmere import (
     MECHANICS_KEYWORDS,
     UNIVERSAL_INLINE_FIXES,
+    is_substantive_chapter,
     patch_cosmere_rules,
 )
 
@@ -152,3 +153,21 @@ def test_full_patch_cosmere_rules_suite():
     assert "## Cadmium Allomancy Era 2\n" in result
     assert "## Tier 2\n" in result
     assert "Activation: [Passive / Varies]" in result
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("00-Credits.pdf", False),
+        ("Table of Contents", False),
+        ("Character Sheet", False),
+        ("07-Tracking Sheet.pdf", False),
+        ("Index", False),
+        ("01-Part 1 - Alethi Ambush.pdf", True),
+        ("04-Appendix A - Equipment.pdf", True),
+        ("Chapter 1 - Character Creation", True),
+    ],
+)
+def test_is_substantive_chapter(title: str, expected: bool):
+    assert is_substantive_chapter(title) is expected
+

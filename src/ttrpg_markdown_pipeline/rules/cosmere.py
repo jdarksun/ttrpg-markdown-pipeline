@@ -30,6 +30,7 @@ CHAPTER_DENYLIST = [
     "acknowledgments",
     "acknowledgements",
     "character sheet",
+    "tracking sheet",
     "index",
     "glossary",
     "backertable",
