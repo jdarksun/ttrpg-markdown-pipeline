@@ -80,7 +80,10 @@ class OKFConcept(BaseModel):
                 parts.append(f"\n{body}")
 
         if example:
-            parts.append(f"\n### Example Play\n\n{example}\n")
+            if not example.startswith("### Example"):
+                parts.append(f"\n### Example Play\n\n{example}\n")
+            else:
+                parts.append(f"\n{example}\n")
         elif body:
             parts[-1] = parts[-1] + "\n"
         else:
@@ -193,7 +196,10 @@ class OKFLoreEntry(OKFConcept):
             parts.append(f"\n### Adventure Hooks\n\n{hooks_md}")
 
         if example:
-            parts.append(f"\n### Example Play\n\n{example}\n")
+            if not example.startswith("### Example"):
+                parts.append(f"\n### Example Play\n\n{example}\n")
+            else:
+                parts.append(f"\n{example}\n")
         elif body or self.adventure_hooks:
             parts[-1] = parts[-1] + "\n"
         else:
@@ -277,7 +283,10 @@ class OKFAdventureNode(OKFConcept):
 
         example = self.example_text.strip() if self.example_text else None
         if example:
-            parts.append(f"\n### Example Play\n\n{example}\n")
+            if not example.startswith("### Example"):
+                parts.append(f"\n### Example Play\n\n{example}\n")
+            else:
+                parts.append(f"\n{example}\n")
         elif len(parts) > 1:
             parts[-1] = parts[-1] + "\n"
         else:

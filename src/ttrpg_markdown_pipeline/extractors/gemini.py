@@ -879,7 +879,7 @@ def extract_pdf(
 
                 if chunk_file.exists():
                     cached_text = chunk_file.read_text(encoding="utf-8")
-                    if cached_text.strip().startswith("[") and not is_valid_json_chunk(cached_text):
+                    if cached_text.strip().startswith(("[", "```")) and not is_valid_json_chunk(cached_text):
                         print(f"[{ts}] {label} [!] Cached chunk is truncated or invalid JSON; re-extracting...")
                     else:
                         _GLOBAL_RUN_REPORT.cached_chunks_skipped += 1

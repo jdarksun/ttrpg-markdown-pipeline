@@ -77,9 +77,36 @@ def split_docling_by_headers(docling_text: str) -> dict[str, str]:
 
 def _normalize_for_subsumption(text: str) -> str:
     """Normalizes text for substring and subsumption comparisons by collapsing whitespace and formatting."""
-    lowered = text.lower()
-    cleaned = re.sub(r"[#*_`~>|-]", " ", lowered)
+    # Strip relative markdown links and section headers added by OKF serialization
+    unlinked = re.sub(r"\[([^\]]+)\]\((?!https?://)[^)]+\.md\)", r"\1", text)
+    unlinked = re.sub(r"^###\s+Mechanics\b", " ", unlinked, flags=re.IGNORECASE | re.MULTILINE)
+    # Strip bracketed action/plot icon tags that may be present in one chunk and omitted in another
+    unlinked = re.sub(
+        r"\[(?:1|2|3)\s+Actions?\]|\[(?:Free Action|Reaction|Passive|Special Activation|Opportunity|Complication)\]",
+        " ",
+        unlinked,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", unlinked.lower())
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _parse_vault_markdown_body(raw_body_section: str) -> tuple[str, str | None]:
+    """Extracts clean body_text and example_text from an existing serialized OKF vault file body."""
+    unlinked = re.sub(r"\[([^\]]+)\]\((?!https?://)[^)]+\.md\)", r"\1", raw_body_section.strip())
+    ex_parts = re.split(
+        r"(?:^|\r?\n)###\s+Example(?:\s+Play)?[ \t]*(?:\r?\n)+",
+        unlinked,
+        flags=re.IGNORECASE,
+    )
+    body_part = re.sub(
+        r"^###\s+Mechanics[ \t]*(?:\r?\n)+",
+        "",
+        ex_parts[0].strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+    example_part = "\n\n".join(p.strip() for p in ex_parts[1:] if p.strip()) or None
+    return body_part, example_part
 
 
 def _is_subsumed_rule(child: dict[str, Any], parent: dict[str, Any]) -> bool:
@@ -107,8 +134,8 @@ def _is_subsumed_rule(child: dict[str, Any], parent: dict[str, Any]) -> bool:
     if not norm_child:
         return False
 
-    # Criterion 1: Parent body contains child name as a markdown subheading AND a body snippet
-    heading_pattern = rf"^#{{2,4}}\s+{re.escape(child_name)}(?:\s|$)"
+    # Criterion 1: Parent body contains child name as a subheading line AND a body snippet
+    heading_pattern = rf"^(?:#{{2,4}}\s+|\*\*)?{re.escape(child_name)}(?:\*\*)?(?:[ \t]*$|\s)"
     has_heading = bool(re.search(heading_pattern, parent_body, re.IGNORECASE | re.MULTILINE))
     snippet = norm_child[: min(len(norm_child), 50)]
     if has_heading and snippet and snippet in norm_parent:
@@ -581,9 +608,11 @@ def shred_chapter(
                 parts = existing_raw.split("---\n", 2)
                 if len(parts) >= 3:
                     existing_meta = yaml.safe_load(parts[1]) or {}
-                    existing_body = parts[2].strip()
+                    existing_body, existing_example = _parse_vault_markdown_body(parts[2])
                     existing_item = dict(existing_meta)
                     existing_item["body_text"] = existing_body
+                    if existing_example and not existing_item.get("example_text"):
+                        existing_item["example_text"] = existing_example
                     merged_items = consolidate_concepts([existing_item, item])
                     item = merged_items[0]
             except Exception as e:
@@ -593,12 +622,21 @@ def shred_chapter(
         file_path.write_text(concept.to_markdown(), encoding="utf-8")
         saved_files.append(file_path)
 
-        # Orphan cleanup: if this parent rule contains ### Subheadings, clean up any standalone child files on disk
+        # Orphan cleanup: clean up standalone child files on disk subsumed by this parent concept
         if c_type in ("rule", "lore") and item.get("body_text"):
-            child_subheadings = re.findall(r"^#{3,4}\s+([^\n]+)", str(item["body_text"]), re.MULTILINE)
-            for child_subheading in child_subheadings:
+            candidate_child_slugs: set[str] = set()
+            for child_subheading in re.findall(r"^#{3,4}\s+([^\n]+)", str(item["body_text"]), re.MULTILINE):
                 child_clean = re.sub(r"\s*\([^)]*\)", "", child_subheading).strip()
-                child_slug = sanitize_slug(child_clean)
+                if child_clean:
+                    candidate_child_slugs.add(sanitize_slug(child_clean))
+
+            for raw_candidate in concepts_raw:
+                if isinstance(raw_candidate, dict) and raw_candidate.get("name"):
+                    raw_slug = sanitize_slug(str(raw_candidate["name"]))
+                    if raw_slug != slug and _is_subsumed_rule(raw_candidate, item):
+                        candidate_child_slugs.add(raw_slug)
+
+            for child_slug in sorted(candidate_child_slugs):
                 child_path = target_dir / f"{child_slug}.md"
                 if child_path.exists() and child_path.resolve() != file_path.resolve():
                     try:
@@ -606,8 +644,9 @@ def shred_chapter(
                         child_parts = child_raw.split("---\n", 2)
                         if len(child_parts) >= 3:
                             child_meta = yaml.safe_load(child_parts[1]) or {}
+                            child_body, _ = _parse_vault_markdown_body(child_parts[2])
                             child_item = dict(child_meta)
-                            child_item["body_text"] = child_parts[2].strip()
+                            child_item["body_text"] = child_body
                             if _is_subsumed_rule(child_item, item):
                                 child_path.unlink()
                                 logger.info("Cleaned up orphaned subsumed child concept: %s", child_path.name)
